@@ -22,7 +22,7 @@ import sys
 import threading
 
 import requests
-from flask import Flask, request
+from flask import Flask, jsonify, request
 from tuya_connector import TuyaOpenAPI
 import anthropic
 
@@ -338,15 +338,23 @@ def ses():
         metin = groq_transkript(veri, ad)
     except Exception as e:
         log.exception("Groq hatası")
+        if request.args.get("format") == "json":
+            return jsonify({"transkript": "", "cevap": f"Sesi anlayamadım: {e}", "temizlendi": False})
         return duz_metin(f"Sesi anlayamadım: {e}")
 
     log.info("Transkript: %r", metin)
-    if bellek_temizleme_istegi(metin):
+    temizlik = bellek_temizleme_istegi(metin)
+    if temizlik:
         sohbet_temizle(oturum_id())
-        return duz_metin("Sohbet hafızasını temizledim, yeni bir sayfa açtık.")
-    cevap = isle_komut(metin, gecmisten_mesajlar(oturum_id()))[0]
-    if not cevap.startswith("Cevap üretirken hata"):
-        sohbet_ekle(oturum_id(), metin, cevap)
+        cevap = "Sohbet hafızasını temizledim, yeni bir sayfa açtık."
+    else:
+        cevap = isle_komut(metin, gecmisten_mesajlar(oturum_id()))[0]
+        if not cevap.startswith("Cevap üretirken hata"):
+            sohbet_ekle(oturum_id(), metin, cevap)
+
+    # format=json: istemci hem transkripti hem cevabı alır (hafızaya eklemek için)
+    if request.args.get("format") == "json":
+        return jsonify({"transkript": metin, "cevap": cevap, "temizlendi": temizlik})
     return duz_metin(cevap)
 
 
