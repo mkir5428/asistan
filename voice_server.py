@@ -25,13 +25,14 @@ import os
 import re
 import sys
 import threading
+from datetime import datetime, timedelta, timezone
 
 import requests
 from flask import Flask, Response, jsonify, request
 from tuya_connector import TuyaOpenAPI
 import anthropic
 
-SURUM = "4.1"
+SURUM = "4.2"
 
 # ==================== LOG ====================
 logging.basicConfig(
@@ -83,25 +84,34 @@ def claude_istemci():
 
 
 KISILIK = (
-    "Sen Çip'sin: kullanıcının kendi telefonunda çalışan, kişisel bir yapay zeka "
-    "asistanısın. Bir yapay zeka modeli olduğunu ya da başka bir şirket/model "
-    "tarafından yapıldığını asla söyleme; sen Çip'sin, o kadar. "
-    "Kullanıcıya her zaman 'Şef' diye hitap et (örn. 'Tamamdır Şef', 'Hallettim Şef'). "
-    "Cevapların sesli okunacağı için kısa, net, günlük konuşma diliyle yaz (1-4 cümle). "
-    "Emoji kullanma. Markdown kullanma. Bilmediğin şeyi uydurma, kısaca söyle. "
-    "Kullanıcıya samimi, esprili ama saygılı davran."
+    "Sen Çip'sin: kullanıcının telefonunda yaşayan kişisel sesli asistan. "
+    "Yapay zeka modeli ya da başka bir şirketin ürünü olduğunu asla söyleme; sen Çip'sin. "
+    "Kullanıcıya 'sen' diye, samimi ve rahat hitap et; ona 'Şef' de (her cümlede değil, doğal yerlerde). "
+    "KURALLAR: Cevapların sesli okunacak. En fazla 2-3 kısa cümle yaz, gereksiz giriş, "
+    "özür, tekrar ve 'size nasıl yardımcı olabilirim' gibi kalıplar kullanma. "
+    "Emoji ve Markdown kullanma. Doğrudan sonuca git. "
+    "Sorunun cevabını biliyorsan net söyle, bilmiyorsan uydurma, tek cümleyle söyle. "
+    "HAFIZA: Bu konuşmadaki önceki mesajları ve kullanıcı bilgilerini (adı vb.) hatırla ve kullan; "
+    "'bilmiyorum, söylemediniz' deme, önce geçmişe bak. "
+    "Matematik, mantık ve bilgi sorularında önce doğru cevabı düşün, sonra kısa söyle."
 )
 
 
+def simdi_metni() -> str:
+    gunler = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+    t = datetime.now(timezone(timedelta(hours=3)))  # Türkiye saati
+    return f"{t.day}.{t.month}.{t.year} {gunler[t.weekday()]}, saat {t.hour:02d}:{t.minute:02d} (Türkiye)"
+
+
 def claude_cevap(metin: str, gecmis: list = None, profil: str = "") -> str:
-    sistem = KISILIK
+    sistem = KISILIK + "\n\nŞu an: " + simdi_metni()
     if profil:
         sistem += "\n\nKullanıcı hakkında bildiklerin (bu bilgiye göre kişiselleştir):\n" + profil[:1000]
     mesajlar = list(gecmis or [])
     mesajlar.append({"role": "user", "content": metin})
     yanit = claude_istemci().messages.create(
-        model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5"),
-        max_tokens=512,
+        model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5"),
+        max_tokens=350,
         system=sistem,
         messages=mesajlar,
     )
@@ -114,7 +124,7 @@ def claude_cevap(metin: str, gecmis: list = None, profil: str = "") -> str:
 def claude_sistem_gorevi(gorev: str, metin: str) -> str:
     """Çeviri/özet gibi tek seferlik görevler: kişilik yok, sadece görev."""
     yanit = claude_istemci().messages.create(
-        model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5"),
+        model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5"),
         max_tokens=1024,
         system=gorev,
         messages=[{"role": "user", "content": metin}],
@@ -421,7 +431,7 @@ def saglik():
 @app.route("/komut", methods=["GET"])
 def komut():
     metin = request.args.get("text", "")
-    log.info("Komut: %r", metin)
+    log.info("Komut: %r (gecmis=%d mesaj, profil=%d harf)", metin, len(gecmisten_mesajlar(oturum_id())), len(profil_metni()))
     if bellek_temizleme_istegi(metin):
         sohbet_temizle(oturum_id())
         return duz_metin("Sohbet hafızasını temizledim, yeni bir sayfa açtık.")
