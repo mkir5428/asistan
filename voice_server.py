@@ -1,19 +1,24 @@
 """
-Çip sesli asistan sunucusu (Render) — v3.0.
+Çip sesli asistan sunucusu (Render) — v4.0.
 
 Uç noktalar:
-  GET  /                       -> sağlık/teşhis sayfası (hangi env var/yok)
-  GET  /komut?text=...&session=...&gecmis=[...] -> sohbetli metin komutu
-  POST /ses (multipart: file, session)         -> ses dosyası (Groq) -> komut
+  GET  /                        -> sağlık/teşhis sayfası
+  GET  /komut?text=...&gecmis=...&profil=...    -> sohbetli AI komutu
+  POST /ses (multipart: file, + format=json)    -> ses (Groq) -> komut
   GET  /cevir?text=...&dil=...  -> çeviri (Claude)
   GET  /ozet?text=...&mod=...   -> özetleme (Claude)
-  GET  /temizle?session=...     -> oturum hafızasını sıfırla
+  GET  /hava?sehir=...          -> hava durumu (open-meteo, anahtarsız)
+  GET  /hesap?ifade=...         -> güvenli hesap makinesi
+  GET  /seslendir?metin=...     -> doğal Türkçe ses (edge-tts, mp3)
+  GET  /temizle?session=...     -> sunucu tarafı oturum hafızasını sıfırla
 
-Tasarım ilkesi: AÇILIŞTA HİÇBİR ŞEY ÇÖKMEZ. API anahtarları ve Tuya
-bağlantısı tembel (lazy) yüklenir; eksikse istek anında anlaşılır
-Türkçe mesaj döner, servis ayakta kalır.
+Tasarım ilkesi: AÇILIŞTA HİÇBİR ŞEY ÇÖKMEZ. Anahtarlar/bağlantılar tembel;
+eksik servis istek anında anlaşılır Türkçe mesaj döner.
 """
 
+import asyncio
+import io
+import ast
 import json
 import logging
 import os
@@ -22,11 +27,11 @@ import sys
 import threading
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 from tuya_connector import TuyaOpenAPI
 import anthropic
 
-SURUM = "3.0"
+SURUM = "4.1"
 
 # ==================== LOG ====================
 logging.basicConfig(
@@ -78,30 +83,26 @@ def claude_istemci():
 
 
 KISILIK = (
-    "Sen Çip adlı Türkçe sesli asistansın. Cevapların sesli okunacağı için "
-    "kısa, net, günlük konuşma diliyle yaz (1-4 cümle). Emoji kullanma. "
-    "Markdown kullanma. Bilmediğin şeyi uydurma, kısaca söyle. "
-    "Kullanıcıya 'kanka' gibi samimi ama saygılı hitap edebilirsin."
+    "Sen Çip'sin: kullanıcının kendi telefonunda çalışan, kişisel bir yapay zeka "
+    "asistanısın. Bir yapay zeka modeli olduğunu ya da başka bir şirket/model "
+    "tarafından yapıldığını asla söyleme; sen Çip'sin, o kadar. "
+    "Kullanıcıya her zaman 'Şef' diye hitap et (örn. 'Tamamdır Şef', 'Hallettim Şef'). "
+    "Cevapların sesli okunacağı için kısa, net, günlük konuşma diliyle yaz (1-4 cümle). "
+    "Emoji kullanma. Markdown kullanma. Bilmediğin şeyi uydurma, kısaca söyle. "
+    "Kullanıcıya samimi, esprili ama saygılı davran."
 )
 
-DIL_ADLARI = {
-    "ingilizce": "İngilizce", "english": "İngilizce",
-    "turkce": "Türkçe", "türkçe": "Türkçe",
-    "almanca": "Almanca", "deutsch": "Almanca",
-    "fransizca": "Fransızca", "ispanyolca": "İspanyolca",
-    "italyanca": "İtalyanca", "rusca": "Rusça",
-    "arapca": "Arapça", "japonca": "Japonca",
-    "korece": "Korece", "cince": "Çince",
-}
 
-
-def claude_cevap(metin: str, gecmis: list = None) -> str:
+def claude_cevap(metin: str, gecmis: list = None, profil: str = "") -> str:
+    sistem = KISILIK
+    if profil:
+        sistem += "\n\nKullanıcı hakkında bildiklerin (bu bilgiye göre kişiselleştir):\n" + profil[:1000]
     mesajlar = list(gecmis or [])
     mesajlar.append({"role": "user", "content": metin})
     yanit = claude_istemci().messages.create(
         model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-5"),
         max_tokens=512,
-        system=KISILIK,
+        system=sistem,
         messages=mesajlar,
     )
     for blok in yanit.content:
@@ -180,9 +181,122 @@ def tuya_ampul(acilsin: bool) -> str:
         return f"Ampule ulaşamadım: {e}"
 
 
+# ==================== HAVA DURUMU (open-meteo, anahtarsız) ====================
+
+HAVA_KODLARI = {
+    0: "açık ve güneşli", 1: "az bulutlu", 2: "parçalı bulutlu", 3: "kapalı",
+    45: "sisli", 48: "kırağılı sisli",
+    51: "hafif çisentili", 53: "çisentili", 55: "yoğun çisentili",
+    56: "dondurucu çisentili", 57: "yoğun dondurucu çisentili",
+    61: "hafif yağmurlu", 63: "yağmurlu", 65: "şiddetli yağmurlu",
+    66: "dondurucu yağmurlu", 67: "şiddetli dondurucu yağmurlu",
+    71: "hafif kar yağışlı", 73: "kar yağışlı", 75: "yoğun kar yağışlı",
+    77: "kar taneli",
+    80: "hafif sağanaklı", 81: "sağanak yağışlı", 82: "şiddetli sağanaklı",
+    85: "kar sağanaklı", 86: "yoğun kar sağanaklı",
+    95: "gök gürültülü fırtınalı", 96: "dolulu fırtınalı", 99: "şiddetli dolulu fırtınalı",
+}
+
+
+def hava_cek(sehir: str):
+    geo = requests.get(
+        "https://geocoding-api.open-meteo.com/v1/search",
+        params={"name": sehir, "count": 1, "language": "tr", "format": "json"},
+        timeout=10,
+    ).json()
+    sonuc = geo.get("results") or []
+    if not sonuc:
+        return None
+    yer = sonuc[0]
+    w = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": yer["latitude"],
+            "longitude": yer["longitude"],
+            "current": "temperature_2m,weather_code,wind_speed_10m,relative_humidity_2m",
+            "daily": "temperature_2m_max,temperature_2m_min",
+            "forecast_days": 1,
+            "timezone": "auto",
+        },
+        timeout=10,
+    ).json()
+    anlik = w.get("current") or {}
+    gunluk = w.get("daily") or {}
+    kod = int(anlik.get("weather_code", -1))
+    aciklama = HAVA_KODLARI.get(kod, "değişken")
+    return (
+        f"{yer['name']} şu an {round(anlik.get('temperature_2m', 0))} derece, {aciklama}. "
+        f"Bugün en düşük {round((gunluk.get('temperature_2m_min') or [0])[0])}, "
+        f"en yüksek {round((gunluk.get('temperature_2m_max') or [0])[0])} derece. "
+        f"Nem yüzde {round(anlik.get('relative_humidity_2m', 0))}, "
+        f"rüzgâr {round(anlik.get('wind_speed_10m', 0))} kilometre saat."
+    )
+
+
+# ==================== GÜVENLİ HESAP MAKİNESİ ====================
+
+KELIME_ISLEMLER = [
+    (re.compile(r"\b(üssü|ussu|us su|ussune|kuvvet)\b"), "**"),
+    (re.compile(r"\b(artı|arti|artir|plus)\b"), "+"),
+    (re.compile(r"\b(eksi|minus)\b"), "-"),
+    (re.compile(r"\b(çarpı|carpi|kere)\b"), "*"),
+    (re.compile(r"\b(bölü|bolu|böl|over)\b"), "/"),
+]
+
+IZINLI_DUGUMLER = (
+    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv,
+    ast.USub, ast.UAdd,
+)
+
+
+def guvenli_hesap(ifade: str):
+    """Sadece aritmetik: harf/fonksiyon/şüpheli şey varsa reddeder."""
+    temiz = ifade.strip()
+    for desen, isaret in KELIME_ISLEMLER:
+        temiz = desen.sub(isaret, temiz)
+    temiz = temiz.replace("x", "*").replace("X", "*").replace(",", ".")
+    temiz = re.sub(r"[^0-9+\-*/().%\s\x00]", "", temiz.replace("**", "\x00")).replace("\x00", "**").strip()
+    if not temiz or not re.search(r"\d", temiz):
+        raise ValueError("sayı yok")
+    agac = ast.parse(temiz, mode="eval")
+    for dugum in ast.walk(agac):
+        if not isinstance(dugum, IZINLI_DUGUMLER):
+            raise ValueError("yasaklı ifade")
+        if isinstance(dugum, ast.Constant) and not isinstance(dugum.value, (int, float)):
+            raise ValueError("sayı olmayan sabit")
+    sonuc = eval(  # noqa: S307 — AST beyaz listesiyle sınırlı
+        compile(agac, "<hesap>", "eval"),
+        {"__builtins__": {}},
+        {},
+    )
+    if isinstance(sonuc, float) and sonuc.is_integer():
+        sonuc = int(sonuc)
+    return temiz, sonuc
+
+
+# ==================== DOĞAL SES (edge-tts) ====================
+
+
+def edge_ses_uret(metin: str) -> bytes:
+    import edge_tts
+
+    ses = os.environ.get("EDGE_TTS_SES", "tr-TR-EmelNeural")
+
+    async def olustur() -> bytes:
+        buf = io.BytesIO()
+        akis = edge_tts.Communicate(metin, ses)
+        async for parca in akis.stream():
+            if parca["type"] == "audio":
+                buf.write(parca["data"])
+        return buf.getvalue()
+
+    return asyncio.run(olustur())
+
+
 # ==================== OTURUM HAFIZASI ====================
 
-MAX_SOHBET_TURU = 20  # tur = soru + cevap
+MAX_SOHBET_TURU = 20
 _sohbetler = {}
 _sohbet_kilit = threading.Lock()
 
@@ -199,7 +313,6 @@ def sohbet_ekle(session: str, soru: str, cevap: str):
         gecmis = _sohbetler.setdefault(session, [])
         gecmis.append({"role": "user", "content": soru})
         gecmis.append({"role": "assistant", "content": cevap})
-        # Limiti aşarsa en eski turu at (liste çift elemanlı kalır)
         while len(gecmis) > MAX_SOHBET_TURU * 2:
             del gecmis[0:2]
 
@@ -210,7 +323,7 @@ def sohbet_temizle(session: str):
 
 
 def gecmisten_mesajlar(session: str) -> list:
-    """İstemcinin gönderdiği gecmis JSON'u geçerliyse onu kullan, yoksa sunucu hafızası."""
+    """İstemcinin gönderdiği gecmis JSON'u geçerliyse onu kullan (telefon kalıcı hafızası)."""
     ham = request.args.get("gecmis", "")
     if ham:
         try:
@@ -234,7 +347,6 @@ def gecmisten_mesajlar(session: str) -> list:
 
 
 def tr_den_ascii(metin: str) -> str:
-    """Türkçe harfleri ASCII muadiline çevirir (kelime eşleştirme için)."""
     return (
         metin.lower()
         .replace("ç", "c").replace("ğ", "g").replace("ı", "i")
@@ -251,19 +363,17 @@ HAFIZA_KELIMELER = re.compile(r"\b(hafiza\w*|sohbet\w*|gecmis\w*)\b")
 
 
 def bellek_temizleme_istegi(metin: str) -> bool:
-    """'sohbeti unut', 'hafızayı temizle' gibi istekleri yakalar."""
     a = tr_den_ascii(metin)
     return bool(TEMIZLE_KELIMELER.search(a) and HAFIZA_KELIMELER.search(a))
 
 
-def isle_komut(metin: str, gecmis: list = None):
+def isle_komut(metin: str, gecmis: list = None, profil: str = ""):
     metin = (metin or "").strip()
     if not metin:
         return duz_metin("Bir şey duymadım.")
 
     ascii_metin = tr_den_ascii(metin)
 
-    # Akıllı ampul: "ışığı aç", "ampulü kapat", "lamba yak" gibi.
     if LAMBA_KELIMELER.search(ascii_metin):
         if ACMA_KELIMELER.search(ascii_metin):
             log.info("Ampul komutu: AÇ")
@@ -273,7 +383,7 @@ def isle_komut(metin: str, gecmis: list = None):
             return duz_metin(tuya_ampul(False))
 
     try:
-        return duz_metin(claude_cevap(metin, gecmis))
+        return duz_metin(claude_cevap(metin, gecmis, profil))
     except Exception as e:
         log.exception("Claude hatası")
         return duz_metin(f"Cevap üretirken hata oldu: {e}")
@@ -290,18 +400,21 @@ def oturum_id() -> str:
     return (request.args.get("session", "") or "varsayilan").strip()[:80]
 
 
+def profil_metni() -> str:
+    return (request.args.get("profil", "") or "").strip()[:1000]
+
+
 @app.route("/")
 def saglik():
     durum = "\n".join(
         f"{'✓' if env_aldi(ad) else '✗ EKSİK'}  {ad}" for ad in GEREKLILER
     )
-    aktif = len(_sohbetler)
     return duz_metin(
         f"Çip sunucusu v{SURUM} ayakta.\n"
         f"Ortam değişkenleri (Render > Environment):\n{durum}\n"
-        f"Aktif oturum sayısı: {aktif}\n\n"
-        "Test: /komut?text=merhaba  veya  POST /ses (file alanı)\n"
-        "AI: /cevir?text=...&dil=ingilizce   /ozet?text=...&mod=kisa   /temizle?session=..."
+        f"Aktif oturum sayısı: {len(_sohbetler)}\n\n"
+        "AI: /komut?text=...  /cevir  /ozet  /temizle\n"
+        "Araçlar: /hava?sehir=...  /hesap?ifade=...  /seslendir?metin=..."
     )
 
 
@@ -312,7 +425,7 @@ def komut():
     if bellek_temizleme_istegi(metin):
         sohbet_temizle(oturum_id())
         return duz_metin("Sohbet hafızasını temizledim, yeni bir sayfa açtık.")
-    cevap = isle_komut(metin, gecmisten_mesajlar(oturum_id()))[0]
+    cevap = isle_komut(metin, gecmisten_mesajlar(oturum_id()), profil_metni())[0]
     if not cevap.startswith("Cevap üretirken hata"):
         sohbet_ekle(oturum_id(), metin, cevap)
     return duz_metin(cevap)
@@ -325,7 +438,6 @@ def ses():
         veri = dosya.read()
         ad = dosya.filename or "audio.m4a"
     elif request.data:
-        # Ham gövde de kabul edilir (farklı istemciler için)
         veri = request.data
         ad = "audio.m4a"
     else:
@@ -348,11 +460,10 @@ def ses():
         sohbet_temizle(oturum_id())
         cevap = "Sohbet hafızasını temizledim, yeni bir sayfa açtık."
     else:
-        cevap = isle_komut(metin, gecmisten_mesajlar(oturum_id()))[0]
+        cevap = isle_komut(metin, gecmisten_mesajlar(oturum_id()), profil_metni())[0]
         if not cevap.startswith("Cevap üretirken hata"):
             sohbet_ekle(oturum_id(), metin, cevap)
 
-    # format=json: istemci hem transkripti hem cevabı alır (hafızaya eklemek için)
     if request.args.get("format") == "json":
         return jsonify({"transkript": metin, "cevap": cevap, "temizlendi": temizlik})
     return duz_metin(cevap)
@@ -372,9 +483,7 @@ def cevir():
         return duz_metin("Çevrilecek metin boş. Örnek: /cevir?text=merhaba&dil=ingilizce")
 
     dil = (request.args.get("dil", "") or "").strip().lower()
-    dil_adi = DIL_ADLARI.get(tr_den_ascii(dil))
-    if not dil_adi:
-        dil_adi = dil.capitalize() if dil else "İngilizce"
+    dil_adi = dil.capitalize() if dil else "İngilizce"
 
     try:
         sonuc = claude_sistem_gorevi(CEVIRI_GOREVI, f"{dil_adi} diline çevir:\n\n{metin}")
@@ -411,6 +520,46 @@ def ozet():
     except Exception as e:
         log.exception("Özet hatası")
         return duz_metin(f"Özet başarısız: {e}")
+
+
+@app.route("/hava", methods=["GET"])
+def hava():
+    sehir = (request.args.get("sehir", "") or "").strip()
+    if not sehir:
+        return duz_metin("Hangi şehrin havasına bakayım? Örnek: /hava?sehir=istanbul")
+    try:
+        bilgi = hava_cek(sehir)
+        if not bilgi:
+            return duz_metin(f"'{sehir}' diye bir yer bulamadım, şehir adını kontrol eder misin?")
+        return duz_metin(bilgi)
+    except Exception as e:
+        log.exception("Hava hatası")
+        return duz_metin(f"Hava bilgisine ulaşamadım: {e}")
+
+
+@app.route("/hesap", methods=["GET"])
+def hesap():
+    ifade = (request.args.get("ifade", "") or "").strip()
+    if not ifade:
+        return duz_metin("Ne hesaplayayım? Örnek: /hesap?ifade=12.5 çarpı 4")
+    try:
+        temiz, sonuc = guvenli_hesap(ifade)
+        return duz_metin(f"{temiz} = {sonuc}")
+    except Exception:
+        return duz_metin("Bunu hesaplayamadım. Örnek: '12 çarpı 4', '(5 artı 3) bölü 2'")
+
+
+@app.route("/seslendir", methods=["GET"])
+def seslendir_rute():
+    metin = (request.args.get("metin", "") or "").strip()[:500]
+    if not metin:
+        return duz_metin("Seslendirilecek metin boş.")
+    try:
+        veri = edge_ses_uret(metin)
+        return Response(veri, mimetype="audio/mpeg")
+    except Exception as e:
+        log.exception("edge-tts hatası")
+        return duz_metin(f"Ses üretilemedi: {e}")
 
 
 @app.route("/temizle", methods=["GET"])
