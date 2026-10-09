@@ -32,7 +32,7 @@ from flask import Flask, Response, jsonify, request
 from tuya_connector import TuyaOpenAPI
 import anthropic
 
-SURUM = "4.2"
+SURUM = "4.3"
 
 # ==================== LOG ====================
 logging.basicConfig(
@@ -334,7 +334,7 @@ def sohbet_temizle(session: str):
 
 def gecmisten_mesajlar(session: str) -> list:
     """İstemcinin gönderdiği gecmis JSON'u geçerliyse onu kullan (telefon kalıcı hafızası)."""
-    ham = request.args.get("gecmis", "")
+    ham = request.values.get("gecmis", "")
     if ham:
         try:
             dizi = json.loads(ham)
@@ -407,11 +407,11 @@ def duz_metin(mesaj: str):
 
 
 def oturum_id() -> str:
-    return (request.args.get("session", "") or "varsayilan").strip()[:80]
+    return (request.values.get("session", "") or "varsayilan").strip()[:80]
 
 
 def profil_metni() -> str:
-    return (request.args.get("profil", "") or "").strip()[:1000]
+    return (request.values.get("profil", "") or "").strip()[:1000]
 
 
 @app.route("/")
@@ -428,9 +428,9 @@ def saglik():
     )
 
 
-@app.route("/komut", methods=["GET"])
+@app.route("/komut", methods=["GET", "POST"])
 def komut():
-    metin = request.args.get("text", "")
+    metin = request.values.get("text", "")
     log.info("Komut: %r (gecmis=%d mesaj, profil=%d harf)", metin, len(gecmisten_mesajlar(oturum_id())), len(profil_metni()))
     if bellek_temizleme_istegi(metin):
         sohbet_temizle(oturum_id())
