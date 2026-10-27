@@ -51,17 +51,47 @@ python voice_server.py
 
 ## Android uygulaması
 
-`android-app/` klasörü Çip için yerel Android istemcisidir. Metin ve mikrofonla
-`/komut` ile `/ses` uç noktalarını kullanır; yanıtları Türkçe seslendirir.
+`android-app/` klasörü Çip için yerel Android istemcisidir. Metinle `/komut`,
+isteğe bağlı kısa kayıtla `/ses` uç noktasını kullanır; yanıtları Türkçe
+seslendirir. Uygulama ayrıca Android'in cihaz-üstü konuşma tanımasını kullanarak
+isteğe bağlı “Hey Çip” uyandırma sözcüğünü dinleyebilir. Dinleme yalnızca
+kullanıcı uygulama içindeki düğmeyle başlattığında, açık mikrofon izniyle ve
+durdurma düğmesi bulunan kalıcı bildirimi göstererek çalışır.
+
+Uyandırma sözcüğü yalnızca Android 12+ cihazlarda ve cihazın Türkçe çevrimdışı
+konuşma tanıma hizmeti mevcutsa çalışır. Android, her üreticide Türkçe çevrimdışı
+model bulunduğunu veya tanımanın her zaman doğru olacağını garanti etmez.
+Dinleme servisi ses tanımasını `createOnDeviceSpeechRecognizer` ile cihazda
+gerçekleştirir; kullanılabilir değilse uzaktaki tanımaya sessizce geçmez ve
+uygulamada hata gösterir. Bu sürümde konuşmacı profili/eşleşmesi uygulanmıyor;
+uyandırma sözcüğü ses kimliğini doğrulamaz ve hiçbir ses eşleşmesi ses taklidi
+veya kayıtla kandırılmaya karşı güvenlik garantisi olarak kullanılmamalıdır.
+
+Dosyalar Android sistem belge seçicisiyle, kişiler telefon numarası seçicisiyle,
+takvim etkinlikleri takvim uygulamasının kendi onay ekranıyla açılır. Arama
+yalnızca Android arama ekranını, SMS yalnızca hazır mesaj ekranını açar; uygulama
+sessizce arama yapmaz, SMS göndermez veya tüm kişiler/dosyalara arka planda erişmez.
+Yerel komutlar dar bir listeden eşleştirilir; diğer komutlar mevcut sunucu
+uç noktalarına gider.
+
 İlk açılışta Render sunucu adresini ve `ASISTAN_API_KEY` değerini Ayarlar'a gir.
 Anahtar Android Keystore ile cihazda şifreli saklanır; APK'nın içine gömülmez.
 Uygulamayı başkalarıyla paylaşmak yine anahtarı korumaz: bu kişisel kullanım içindir.
+
+Windows dosya işlemleri için bu uygulamada henüz sunucu uç noktası/sözleşmesi
+bulunmuyor. `WindowsActionApproval` arayüzü, gelecekteki sunucu adaptörünün her
+işlemden önce Android biyometrik onayı istemesi için test edilebilir bir sınır
+sağlar; mevcut `/komut` veya `/ses` protokolü değiştirilmez ve Windows işlemi
+uydurulmuş bir API'ye gönderilmez.
 
 Android Studio'da `android-app/` klasörünü açıp Gradle eşitlemesini tamamla ve
 **Build > Build APK(s)** seç. Komut satırından `android-app/` klasöründe
 `.\gradlew.bat assembleDebug` (Windows) veya `./gradlew assembleDebug` çalıştır.
 Test APK'sı `android-app/app/build/outputs/apk/debug/app-debug.apk` konumuna çıkar.
 Build için Android SDK 36 ve JDK 17 veya üstü gerekir.
+
+Android birim testleri için `android-app/` klasöründe
+`.\gradlew.bat testDebugUnitTest` çalıştır.
 
 ## Render Start Command (önerilen)
 

@@ -1,14 +1,22 @@
 package com.asistan.cip;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.media.MediaRecorder;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
 import android.text.InputType;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
@@ -22,6 +30,10 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import android.provider.CalendarContract;
+import android.provider.ContactsContract;
+import android.provider.OpenableColumns;
 
 import org.json.JSONObject;
 
@@ -48,6 +60,12 @@ import javax.crypto.spec.GCMParameterSpec;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_MICROPHONE = 41;
+    private static final int REQUEST_WAKE_MICROPHONE = 42;
+    private static final int REQUEST_NOTIFICATIONS = 43;
+    private static final int REQUEST_OPEN_FILE = 51;
+    private static final int REQUEST_PICK_CALL = 52;
+    private static final int REQUEST_PICK_SMS = 53;
+    private static final int REQUEST_NATIVE_ACTIVITY = 54;
     private static final String PREFERENCES = "cip_settings";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_SESSION = "session_id";
@@ -61,12 +79,26 @@ public final class MainActivity extends Activity {
     private EditText messageInput;
     private Button sendButton;
     private Button recordButton;
+    private Button wakeWordButton;
+    private TextView wakeStatus;
     private MediaRecorder recorder;
     private File recordingFile;
     private boolean recording;
     private boolean busy;
     private TextToSpeech textToSpeech;
     private boolean ttsReady;
+    private boolean wakeReceiverRegistered;
+
+    private final BroadcastReceiver wakeReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (WakeWordService.ACTION_STATUS.equals(intent.getAction())) {
+                updateWakeStatus(intent.getStringExtra(WakeWordService.EXTRA_STATUS));
+            } else if (WakeWordService.ACTION_COMMAND.equals(intent.getAction())) {
+                handlePendingWakeCommand(intent.getStringExtra(WakeWordService.EXTRA_COMMAND));
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -81,6 +113,21 @@ public final class MainActivity extends Activity {
                 int languageStatus = textToSpeech.setLanguage(new Locale("tr", "TR"));
                 ttsReady = languageStatus != TextToSpeech.LANG_MISSING_DATA
                         && languageStatus != TextToSpeech.LANG_NOT_SUPPORTED;
+            }
+        });
+        textToSpeech.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+            @Override
+            public void onStart(String utteranceId) {
+            }
+
+            @Override
+            public void onDone(String utteranceId) {
+                runOnUiThread(MainActivity.this::resumeWakeWordServiceIfActive);
+            }
+
+            @Override
+            public void onError(String utteranceId) {
+                runOnUiThread(MainActivity.this::resumeWakeWordServiceIfActive);
             }
         });
         if (preferences.getString(KEY_SERVER_URL, "").isEmpty() || !hasApiKey()) {
@@ -109,10 +156,24 @@ public final class MainActivity extends Activity {
         root.addView(header);
 
         TextView intro = new TextView(this);
-        intro.setText("Yazarak konuş veya mikrofonla ses gönder.");
+        intro.setText("Yaz, ses gönder veya “Hey Çip” diyerek cihazda dinlemeyi başlat. "
+                + "Uyandırma sözcüğü konuşmacı kimliğini doğrulamaz.");
         intro.setTextSize(14);
         intro.setTextColor(0xFF52625F);
         root.addView(intro);
+
+        LinearLayout wakeControls = new LinearLayout(this);
+        wakeControls.setGravity(Gravity.CENTER_VERTICAL);
+        wakeStatus = new TextView(this);
+        wakeStatus.setText("Sürekli dinleme kapalı.");
+        wakeStatus.setTextSize(13);
+        wakeStatus.setTextColor(0xFF52625F);
+        wakeControls.addView(wakeStatus, new LinearLayout.LayoutParams(0, -2, 1));
+        wakeWordButton = new Button(this);
+        wakeWordButton.setText("Hey Çip'i aç");
+        wakeWordButton.setOnClickListener(view -> toggleWakeWordService());
+        wakeControls.addView(wakeWordButton);
+        root.addView(wakeControls);
 
         conversation = new LinearLayout(this);
         conversation.setOrientation(LinearLayout.VERTICAL);
@@ -149,7 +210,24 @@ public final class MainActivity extends Activity {
         recordParams.leftMargin = dp(8);
         actions.addView(recordButton, recordParams);
         root.addView(actions);
+
+        LinearLayout deviceActions = new LinearLayout(this);
+        deviceActions.setGravity(Gravity.CENTER);
+        addDeviceActionButton(deviceActions, "Dosya seç", DeviceCommandRouter.Action.OPEN_FILE);
+        addDeviceActionButton(deviceActions, "Kişi ara", DeviceCommandRouter.Action.PICK_PHONE_TO_CALL);
+        addDeviceActionButton(deviceActions, "SMS", DeviceCommandRouter.Action.PICK_PHONE_FOR_SMS);
+        addDeviceActionButton(deviceActions, "Takvim", DeviceCommandRouter.Action.CREATE_CALENDAR_EVENT);
+        root.addView(deviceActions);
         setContentView(root);
+    }
+
+    private void addDeviceActionButton(LinearLayout row, String label, DeviceCommandRouter.Action action) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setTextSize(11);
+        button.setPadding(dp(2), 0, dp(2), 0);
+        button.setOnClickListener(view -> launchDeviceAction(action, null));
+        row.addView(button, new LinearLayout.LayoutParams(0, -2, 1));
     }
 
     private void showSettings() {
@@ -229,19 +307,26 @@ public final class MainActivity extends Activity {
     }
 
     private void sendText() {
-        String text = messageInput.getText().toString().trim();
+        sendText(messageInput.getText().toString().trim());
+    }
+
+    private void sendText(String text) {
+        text = text.trim();
         if (text.isEmpty()) {
             return;
         }
         if (!ensureConfigured()) {
+            resumeWakeWordServiceIfActive();
             return;
         }
         messageInput.setText("");
         addMessage("Sen", text);
+        pauseWakeWordService();
         setBusy(true);
+        final String command = text;
         network.execute(() -> {
             try {
-                String answer = postForm("/komut", "text", text, "session", sessionId());
+                String answer = postForm("/komut", "text", command, "session", sessionId());
                 runOnUiThread(() -> showAnswer(answer));
             } catch (Exception error) {
                 runOnUiThread(() -> showError(error));
@@ -259,11 +344,176 @@ public final class MainActivity extends Activity {
         if (!ensureConfigured()) {
             return;
         }
+        pauseWakeWordService();
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_MICROPHONE);
             return;
         }
         startRecording();
+    }
+
+    private void toggleWakeWordService() {
+        if (WakeWordService.isRunning()) {
+            sendWakeServiceAction(WakeWordService.ACTION_STOP, false);
+            updateWakeStatus("Sürekli dinleme kapatıldı.");
+            return;
+        }
+        startWakeWordAfterPermissions();
+    }
+
+    private void startWakeWordAfterPermissions() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_WAKE_MICROPHONE);
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQUEST_NOTIFICATIONS);
+            return;
+        }
+        Intent service = new Intent(this, WakeWordService.class).setAction(WakeWordService.ACTION_START);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(service);
+            } else {
+                startService(service);
+            }
+            updateWakeStatus("Cihaz-üstü dinleme başlatılıyor...");
+        } catch (RuntimeException error) {
+            updateWakeStatus("Dinleme başlatılamadı: " + error.getMessage());
+        }
+    }
+
+    private void sendWakeServiceAction(String action, boolean starting) {
+        Intent service = new Intent(this, WakeWordService.class).setAction(action);
+        try {
+            if (starting && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(service);
+            } else {
+                startService(service);
+            }
+        } catch (RuntimeException error) {
+            updateWakeStatus("Dinleme durumu değiştirilemedi: " + error.getMessage());
+        }
+    }
+
+    private void pauseWakeWordService() {
+        if (WakeWordService.isRunning()) {
+            sendWakeServiceAction(WakeWordService.ACTION_PAUSE, false);
+        }
+    }
+
+    private void resumeWakeWordServiceIfActive() {
+        if (WakeWordService.isRunning()) {
+            sendWakeServiceAction(WakeWordService.ACTION_RESUME, false);
+        }
+    }
+
+    private void updateWakeStatus(String status) {
+        if (wakeStatus != null) {
+            wakeStatus.setText(status == null ? "Dinleme durumu bilinmiyor." : status);
+        }
+        if (wakeWordButton != null) {
+            wakeWordButton.setText(WakeWordService.isRunning() ? "Hey Çip'i kapat" : "Hey Çip'i aç");
+        }
+    }
+
+    private void handlePendingWakeCommand(String command) {
+        preferences.edit().remove(WakeWordService.PENDING_COMMAND).apply();
+        updateWakeStatus("Uyandırma sözcüğü algılandı.");
+        if (command != null && !command.trim().isEmpty()) {
+            handleAssistantCommand(command);
+        }
+    }
+
+    private void handleAssistantCommand(String command) {
+        DeviceCommandRouter.Result result = DeviceCommandRouter.route(command);
+        if (result != null) {
+            addMessage("Sen", command);
+            pauseWakeWordService();
+            launchDeviceAction(result.action, result.phoneNumber);
+            return;
+        }
+        sendText(command);
+    }
+
+    private void launchDeviceAction(DeviceCommandRouter.Action action, String phoneNumber) {
+        pauseWakeWordService();
+        try {
+            switch (action) {
+                case OPEN_FILE:
+                    Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    picker.addCategory(Intent.CATEGORY_OPENABLE);
+                    picker.setType("*/*");
+                    startActivityForResult(picker, REQUEST_OPEN_FILE);
+                    break;
+                case CREATE_CALENDAR_EVENT:
+                    Intent event = new Intent(Intent.ACTION_INSERT);
+                    event.setData(CalendarContract.Events.CONTENT_URI);
+                    event.putExtra(CalendarContract.Events.TITLE, "Çip ile etkinlik");
+                    event.putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME,
+                            System.currentTimeMillis() + 60 * 60 * 1000L);
+                    event.putExtra(CalendarContract.EXTRA_EVENT_END_TIME,
+                            System.currentTimeMillis() + 2 * 60 * 60 * 1000L);
+                    startActivityForResult(event, REQUEST_NATIVE_ACTIVITY);
+                    break;
+                case PICK_PHONE_TO_CALL:
+                    startActivityForResult(new Intent(Intent.ACTION_PICK,
+                            ContactsContract.CommonDataKinds.Phone.CONTENT_URI), REQUEST_PICK_CALL);
+                    break;
+                case PICK_PHONE_FOR_SMS:
+                    startActivityForResult(new Intent(Intent.ACTION_PICK,
+                            ContactsContract.CommonDataKinds.Phone.CONTENT_URI), REQUEST_PICK_SMS);
+                    break;
+                case DIAL_NUMBER:
+                    startActivityForResult(new Intent(Intent.ACTION_DIAL,
+                            Uri.fromParts("tel", phoneNumber, null)), REQUEST_NATIVE_ACTIVITY);
+                    break;
+                case COMPOSE_SMS:
+                    startActivityForResult(new Intent(Intent.ACTION_SENDTO,
+                            Uri.fromParts("smsto", phoneNumber, null)), REQUEST_NATIVE_ACTIVITY);
+                    break;
+            }
+        } catch (Exception error) {
+            showError(error);
+            resumeWakeWordServiceIfActive();
+        }
+    }
+
+    private void handlePickedPhone(Uri contactUri, boolean composeSms) {
+        if (contactUri == null) {
+            resumeWakeWordServiceIfActive();
+            return;
+        }
+        String number = null;
+        try (Cursor cursor = getContentResolver().query(contactUri,
+                new String[]{ContactsContract.CommonDataKinds.Phone.NUMBER}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                number = cursor.getString(0);
+            }
+        } catch (Exception error) {
+            showError(error);
+        }
+        if (number == null || number.trim().isEmpty()) {
+            addMessage("Hata", "Seçilen kişide kullanılabilir bir telefon numarası yok.");
+            resumeWakeWordServiceIfActive();
+            return;
+        }
+        launchDeviceAction(composeSms ? DeviceCommandRouter.Action.COMPOSE_SMS
+                : DeviceCommandRouter.Action.DIAL_NUMBER, number);
+    }
+
+    private String selectedFileName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri,
+                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                return cursor.getString(0);
+            }
+        } catch (Exception error) {
+            return uri.getLastPathSegment();
+        }
+        return uri.getLastPathSegment();
     }
 
     private void startRecording() {
@@ -292,6 +542,7 @@ public final class MainActivity extends Activity {
         } catch (Exception error) {
             releaseRecorder();
             Toast.makeText(this, "Kayıt başlatılamadı: " + error.getMessage(), Toast.LENGTH_LONG).show();
+            resumeWakeWordServiceIfActive();
         }
     }
 
@@ -307,6 +558,7 @@ public final class MainActivity extends Activity {
             if (recordingFile == null || !recordingFile.isFile() || recordingFile.length() < 1000) {
                 Toast.makeText(this, "Kayıt çok kısa; tekrar deneyebilirsin.", Toast.LENGTH_SHORT).show();
                 deleteRecording();
+                resumeWakeWordServiceIfActive();
                 return;
             }
             uploadRecording(recordingFile);
@@ -314,6 +566,7 @@ public final class MainActivity extends Activity {
             releaseRecorder();
             deleteRecording();
             Toast.makeText(this, "Kayıt tamamlanamadı; biraz daha uzun konuşup tekrar dene.", Toast.LENGTH_LONG).show();
+            resumeWakeWordServiceIfActive();
         }
     }
 
@@ -428,12 +681,18 @@ public final class MainActivity extends Activity {
     private void showAnswer(String answer) {
         addMessage("Çip", answer);
         if (ttsReady && !answer.isEmpty()) {
-            textToSpeech.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "cip-answer");
+            int result = textToSpeech.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "cip-answer");
+            if (result == TextToSpeech.ERROR) {
+                resumeWakeWordServiceIfActive();
+            }
+        } else {
+            resumeWakeWordServiceIfActive();
         }
     }
 
     private void showError(Exception error) {
         addMessage("Hata", error.getMessage() == null ? "Sunucuya bağlanılamadı." : error.getMessage());
+        resumeWakeWordServiceIfActive();
     }
 
     private void addMessage(String sender, String text) {
@@ -574,7 +833,77 @@ public final class MainActivity extends Activity {
                 startRecording();
             } else {
                 Toast.makeText(this, "Sesli komut için mikrofon izni gerekli.", Toast.LENGTH_LONG).show();
+                resumeWakeWordServiceIfActive();
             }
+        } else if (requestCode == REQUEST_WAKE_MICROPHONE) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startWakeWordAfterPermissions();
+            } else {
+                updateWakeStatus("Sürekli dinleme için mikrofon izni gerekli.");
+            }
+        } else if (requestCode == REQUEST_NOTIFICATIONS) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+                    || (grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED)) {
+                startWakeWordAfterPermissions();
+            } else {
+                updateWakeStatus("Sürekli dinleme bildirimi için bildirim izni gerekli.");
+            }
+        }
+    }
+
+    @Override
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    protected void onStart() {
+        super.onStart();
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(WakeWordService.ACTION_STATUS);
+        filter.addAction(WakeWordService.ACTION_COMMAND);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(wakeReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(wakeReceiver, filter);
+        }
+        wakeReceiverRegistered = true;
+        if (WakeWordService.isRunning()) {
+            updateWakeStatus("Hey Çip için cihaz üstünde dinleme açık.");
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        String pendingCommand = preferences.getString(WakeWordService.PENDING_COMMAND, "");
+        if (!pendingCommand.isEmpty()) {
+            handlePendingWakeCommand(pendingCommand);
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        if (wakeReceiverRegistered) {
+            unregisterReceiver(wakeReceiver);
+            wakeReceiverRegistered = false;
+        }
+        super.onStop();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_OPEN_FILE) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                addMessage("Çip", "Seçilen dosya: " + selectedFileName(data.getData()));
+            }
+            resumeWakeWordServiceIfActive();
+        } else if (requestCode == REQUEST_PICK_CALL || requestCode == REQUEST_PICK_SMS) {
+            if (resultCode == RESULT_OK && data != null) {
+                handlePickedPhone(data.getData(), requestCode == REQUEST_PICK_SMS);
+            } else {
+                resumeWakeWordServiceIfActive();
+            }
+        } else if (requestCode == REQUEST_NATIVE_ACTIVITY) {
+            resumeWakeWordServiceIfActive();
         }
     }
 
