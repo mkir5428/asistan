@@ -21,6 +21,21 @@ internal sealed class WorkspaceForm : Form
     private readonly TextBox workingDirectory = new() { Dock = DockStyle.Fill, ReadOnly = true };
     private readonly TextBox arguments = new() { Dock = DockStyle.Fill };
     private readonly Label serverStatus = new() { Dock = DockStyle.Fill, AutoEllipsis = true, Text = "Başlatılmış profil yok." };
+    private readonly ListBox workflows = new() { Dock = DockStyle.Fill, DisplayMember = nameof(ProjectWorkflow.Name) };
+    private readonly ComboBox workflowKind = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly TextBox workflowName = new() { Dock = DockStyle.Fill };
+    private readonly TextBox workflowExecutable = new() { Dock = DockStyle.Fill, ReadOnly = true };
+    private readonly TextBox workflowWorkingDirectory = new() { Dock = DockStyle.Fill, ReadOnly = true };
+    private readonly TextBox workflowArguments = new() { Dock = DockStyle.Fill };
+    private readonly Label workflowStatus = new() { Dock = DockStyle.Fill, AutoEllipsis = true, Text = "Çalışan iş akışı yok." };
+    private readonly RichTextBox workflowLog = new()
+    {
+        Dock = DockStyle.Fill,
+        ReadOnly = true,
+        DetectUrls = false,
+        WordWrap = false,
+        BackColor = SystemColors.Window
+    };
     private readonly RichTextBox serverLog = new()
     {
         Dock = DockStyle.Fill,
@@ -30,6 +45,10 @@ internal sealed class WorkspaceForm : Form
         BackColor = SystemColors.Window
     };
     private Process? managedProcess;
+    private Label? managedProcessStatus;
+    private RichTextBox? managedProcessLog;
+    private string managedProcessDescription = "";
+    private string managedProcessKind = "";
     private bool closing;
 
     public WorkspaceForm(AppState state, Action saveState)
@@ -65,9 +84,11 @@ internal sealed class WorkspaceForm : Form
 
         BuildWorkspaceTab();
         BuildServerTab();
+        BuildWorkflowTab();
         Controls.Add(tabs);
         LoadWorkspaceState();
         RefreshProfiles();
+        RefreshWorkflows();
     }
 
     private void BuildWorkspaceTab()
@@ -227,6 +248,101 @@ internal sealed class WorkspaceForm : Form
         statusLog.Controls.Add(serverStatus, 0, 0);
         statusLog.Controls.Add(serverLog, 0, 1);
         detail.Controls.Add(statusLog, 0, 6);
+        detail.SetColumnSpan(statusLog, 3);
+        layout.Controls.Add(detailGroup, 1, 0);
+        tabs.TabPages.Add(page);
+    }
+
+    private void BuildWorkflowTab()
+    {
+        var page = new TabPage("Derleme/Test");
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            ColumnCount = 2,
+            RowCount = 1
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 235));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        page.Controls.Add(layout);
+
+        var workflowGroup = new GroupBox { Text = "Sabit proje iş akışları", Dock = DockStyle.Fill, Padding = new Padding(8) };
+        workflowGroup.Controls.Add(workflows);
+        var workflowButtons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 38 };
+        workflowGroup.Controls.Add(workflowButtons);
+        var newWorkflow = new Button { Text = "Yeni iş akışı" };
+        newWorkflow.Click += (_, _) => NewWorkflow();
+        workflowButtons.Controls.Add(newWorkflow);
+        var deleteWorkflow = new Button { Text = "Sil" };
+        deleteWorkflow.Click += (_, _) => DeleteWorkflow();
+        workflowButtons.Controls.Add(deleteWorkflow);
+        workflows.SelectedIndexChanged += (_, _) => LoadSelectedWorkflow();
+        layout.Controls.Add(workflowGroup, 0, 0);
+
+        var detailGroup = new GroupBox { Text = "Kullanıcı tarafından tanımlanmış sabit komut", Dock = DockStyle.Fill, Padding = new Padding(8) };
+        var detail = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 8 };
+        detail.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));
+        detail.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        detail.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+        for (var row = 0; row < 5; row++)
+            detail.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        detail.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        detail.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+        detail.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        detailGroup.Controls.Add(detail);
+
+        workflowKind.Items.AddRange(["Derleme", "Test"]);
+        workflowKind.SelectedIndex = 1;
+        workflowName.MaxLength = 50;
+        workflowArguments.MaxLength = 4096;
+        detail.Controls.Add(new Label { Text = "İş akışı türü", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
+        detail.Controls.Add(workflowKind, 1, 0);
+        detail.SetColumnSpan(workflowKind, 2);
+        detail.Controls.Add(new Label { Text = "Ad", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
+        detail.Controls.Add(workflowName, 1, 1);
+        detail.SetColumnSpan(workflowName, 2);
+        detail.Controls.Add(new Label { Text = "Çalıştırılabilir", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2);
+        detail.Controls.Add(workflowExecutable, 1, 2);
+        var chooseExecutable = new Button { Text = "Göz at...", Dock = DockStyle.Fill };
+        chooseExecutable.Click += (_, _) => ChooseWorkflowExecutable();
+        detail.Controls.Add(chooseExecutable, 2, 2);
+        detail.Controls.Add(new Label { Text = "Çalışma klasörü", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
+        detail.Controls.Add(workflowWorkingDirectory, 1, 3);
+        var chooseDirectory = new Button { Text = "Göz at...", Dock = DockStyle.Fill };
+        chooseDirectory.Click += (_, _) => ChooseWorkflowWorkingDirectory();
+        detail.Controls.Add(chooseDirectory, 2, 3);
+        detail.Controls.Add(new Label { Text = "Sabit bağımsız değişkenler", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 4);
+        detail.Controls.Add(workflowArguments, 1, 4);
+        detail.SetColumnSpan(workflowArguments, 2);
+        var save = new Button { Text = "İş akışını kaydet", Dock = DockStyle.Fill };
+        save.Click += (_, _) => SaveWorkflow();
+        detail.Controls.Add(save, 0, 5);
+        detail.SetColumnSpan(save, 3);
+
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true };
+        detail.Controls.Add(actions, 0, 6);
+        detail.SetColumnSpan(actions, 3);
+        var run = new Button { Text = "Seçili iş akışını çalıştır", AutoSize = true };
+        run.Click += (_, _) => RunWorkflow();
+        actions.Controls.Add(run);
+        var stop = new Button { Text = "Durdur", AutoSize = true };
+        stop.Click += (_, _) => StopWorkflow();
+        actions.Controls.Add(stop);
+        actions.Controls.Add(new Label
+        {
+            Text = "Komut kabuğu yok; yalnızca kaydedilmiş Build/Test profili açıkça çalıştırılır.",
+            AutoSize = true,
+            MaximumSize = new Size(420, 0),
+            Padding = new Padding(3, 7, 0, 0)
+        });
+
+        var statusLog = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        statusLog.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        statusLog.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        statusLog.Controls.Add(workflowStatus, 0, 0);
+        statusLog.Controls.Add(workflowLog, 0, 1);
+        detail.Controls.Add(statusLog, 0, 7);
         detail.SetColumnSpan(statusLog, 3);
         layout.Controls.Add(detailGroup, 1, 0);
         tabs.TabPages.Add(page);
@@ -535,57 +651,184 @@ internal sealed class WorkspaceForm : Form
             profiles.SelectedIndex = 0;
     }
 
+    private void NewWorkflow()
+    {
+        if (state.WorkspaceRoot.Length == 0)
+        {
+            ReportWorkflow("Derleme/Test iş akışı için önce çalışma alanı seçin.");
+            return;
+        }
+        workflows.ClearSelected();
+        workflowKind.SelectedIndex = 1;
+        workflowName.Clear();
+        workflowExecutable.Clear();
+        workflowWorkingDirectory.Text = state.WorkspaceRoot;
+        workflowArguments.Clear();
+        workflowName.Focus();
+    }
+
+    private void DeleteWorkflow()
+    {
+        if (workflows.SelectedItem is not ProjectWorkflow selected)
+            return;
+        if (MessageBox.Show(this, $"“{selected.Name}” iş akışı silinsin mi?", "İş akışını sil",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            return;
+        state.ProjectWorkflows.Remove(selected);
+        SaveSettings();
+        RefreshWorkflows();
+        ReportWorkflow($"İş akışı silindi: {selected.Name}");
+    }
+
+    private void LoadSelectedWorkflow()
+    {
+        if (workflows.SelectedItem is not ProjectWorkflow workflow)
+            return;
+        workflowKind.SelectedIndex = workflow.Kind == "build" ? 0 : 1;
+        workflowName.Text = workflow.Name;
+        workflowExecutable.Text = workflow.ExecutablePath;
+        workflowWorkingDirectory.Text = workflow.WorkingDirectory;
+        workflowArguments.Text = workflow.Arguments;
+    }
+
+    private void ChooseWorkflowExecutable()
+    {
+        if (state.WorkspaceRoot.Length == 0)
+        {
+            ReportWorkflow("Önce çalışma alanı seçin.");
+            return;
+        }
+        using var picker = new OpenFileDialog
+        {
+            Title = "Sabit Build/Test yürütücüsünü seçin",
+            InitialDirectory = state.WorkspaceRoot,
+            CheckFileExists = true,
+            Multiselect = false,
+            Filter = "Windows uygulamaları (*.exe)|*.exe"
+        };
+        if (picker.ShowDialog(this) == DialogResult.OK)
+            workflowExecutable.Text = Path.GetFullPath(picker.FileName);
+    }
+
+    private void ChooseWorkflowWorkingDirectory()
+    {
+        if (state.WorkspaceRoot.Length == 0)
+        {
+            ReportWorkflow("Önce çalışma alanı seçin.");
+            return;
+        }
+        using var picker = new FolderBrowserDialog
+        {
+            Description = "İş akışının çalışma klasörünü seçin.",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = false,
+            SelectedPath = Directory.Exists(workflowWorkingDirectory.Text)
+                ? workflowWorkingDirectory.Text
+                : state.WorkspaceRoot
+        };
+        if (picker.ShowDialog(this) == DialogResult.OK)
+            workflowWorkingDirectory.Text = Path.GetFullPath(picker.SelectedPath);
+    }
+
+    private void SaveWorkflow()
+    {
+        try
+        {
+            if (state.WorkspaceRoot.Length == 0)
+                throw new InvalidOperationException("Önce çalışma alanı seçin.");
+            var selected = workflows.SelectedItem as ProjectWorkflow;
+            var workflow = new ProjectWorkflow
+            {
+                Name = workflowName.Text.Trim(),
+                Kind = workflowKind.SelectedIndex == 0 ? "build" : "test",
+                WorkspaceRoot = WorkspaceSecurity.ValidateWorkspaceRoot(state.WorkspaceRoot),
+                ExecutablePath = Path.GetFullPath(workflowExecutable.Text),
+                WorkingDirectory = Path.GetFullPath(workflowWorkingDirectory.Text),
+                Arguments = workflowArguments.Text
+            };
+            WorkspaceSecurity.ValidateProjectWorkflow(workflow, state.WorkspaceRoot);
+            if (selected is null)
+                state.ProjectWorkflows.Add(workflow);
+            else
+            {
+                var index = state.ProjectWorkflows.IndexOf(selected);
+                if (index < 0)
+                    throw new InvalidOperationException("Seçili iş akışı kayıtlı profiller arasında bulunamadı.");
+                state.ProjectWorkflows[index] = workflow;
+            }
+            SaveSettings();
+            RefreshWorkflows(workflow);
+            ReportWorkflow($"“{workflow.Name}” {workflow.Kind} iş akışı kaydedildi.");
+        }
+        catch (Exception error)
+        {
+            ReportWorkflow("İş akışı kaydedilemedi: " + error.Message);
+        }
+    }
+
+    private void RefreshWorkflows(ProjectWorkflow? selectedWorkflow = null)
+    {
+        workflows.Items.Clear();
+        foreach (var workflow in state.ProjectWorkflows)
+            workflows.Items.Add(workflow);
+        if (selectedWorkflow is not null)
+            workflows.SelectedItem = selectedWorkflow;
+        else if (workflows.Items.Count > 0 && workflows.SelectedIndex < 0)
+            workflows.SelectedIndex = 0;
+    }
+
+    private void RunWorkflow()
+    {
+        try
+        {
+            if (workflows.SelectedItem is not ProjectWorkflow workflow)
+                throw new InvalidOperationException("Çalıştırmak için kayıtlı Build veya Test iş akışı seçin.");
+            if (!string.Equals(workflow.WorkspaceRoot, state.WorkspaceRoot, StringComparison.OrdinalIgnoreCase))
+                throw new UnauthorizedAccessException("İş akışının çalışma alanı artık seçili değil.");
+            WorkspaceSecurity.ValidateProjectWorkflow(workflow, state.WorkspaceRoot);
+            LaunchConfiguredProcess(
+                workflow.ExecutablePath,
+                workflow.WorkingDirectory,
+                workflow.Arguments,
+                $"{workflow.Name} ({workflow.Kind})",
+                "workflow",
+                workflowLog,
+                workflowStatus);
+        }
+        catch (Exception error)
+        {
+            ReportWorkflow("İş akışı başlatılamadı: " + error.Message);
+        }
+    }
+
+    private void StopWorkflow()
+    {
+        if (managedProcessKind != "workflow")
+        {
+            ReportWorkflow("Bu pencerede çalışan bir Build/Test iş akışı yok.");
+            return;
+        }
+        try
+        {
+            StopManagedProcess();
+        }
+        catch (Exception error)
+        {
+            ReportWorkflow("İş akışı durdurulamadı: " + error.Message);
+        }
+    }
+
     private void StartServer()
     {
         try
         {
-            if (managedProcess is { HasExited: false })
-                throw new InvalidOperationException("Bu pencerede yönetilen yerel sunucu zaten çalışıyor.");
-            managedProcess?.Dispose();
-            managedProcess = null;
             if (profiles.SelectedItem is not ServerProfile profile)
                 throw new InvalidOperationException("Başlatmak için kayıtlı bir yerel profil seçin.");
             if (!string.Equals(profile.WorkspaceRoot, state.WorkspaceRoot, StringComparison.OrdinalIgnoreCase))
                 throw new UnauthorizedAccessException("Profilin çalışma alanı artık seçili değil. Klasörü yeniden seçin.");
             WorkspaceSecurity.ValidateServerProfile(profile, state.WorkspaceRoot);
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = Path.GetFullPath(profile.ExecutablePath),
-                WorkingDirectory = Path.GetFullPath(profile.WorkingDirectory),
-                Arguments = profile.Arguments,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8
-            };
-            var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-            process.OutputDataReceived += (_, eventArgs) => AppendProcessOutput("OUT", eventArgs.Data);
-            process.ErrorDataReceived += (_, eventArgs) => AppendProcessOutput("ERR", eventArgs.Data);
-            process.Exited += (_, _) =>
-            {
-                if (IsDisposed || closing)
-                    return;
-                BeginInvoke(new Action(() =>
-                {
-                    if (ReferenceEquals(managedProcess, process))
-                    {
-                        serverStatus.Text = $"“{profile.Name}” durdu (kod {process.ExitCode}).";
-                        AppendLog($"Profil durdu (çıkış kodu {process.ExitCode}).");
-                    }
-                }));
-            };
-            if (!process.Start())
-            {
-                process.Dispose();
-                throw new InvalidOperationException("Yerel sunucu süreci başlatılamadı.");
-            }
-            managedProcess = process;
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-            serverStatus.Text = $"“{profile.Name}” çalışıyor (PID {process.Id}).";
-            AppendLog($"Başlatıldı: {startInfo.FileName}");
+            LaunchConfiguredProcess(profile.ExecutablePath, profile.WorkingDirectory, profile.Arguments,
+                profile.Name, "server", serverLog, serverStatus);
         }
         catch (Exception error)
         {
@@ -595,6 +838,11 @@ internal sealed class WorkspaceForm : Form
 
     private void StopServerFromUi()
     {
+        if (managedProcessKind != "server")
+        {
+            Report("Bu pencerede çalışan bir yerel sunucu yok.");
+            return;
+        }
         try
         {
             StopManagedProcess();
@@ -609,6 +857,8 @@ internal sealed class WorkspaceForm : Form
     {
         try
         {
+            if (managedProcess is { HasExited: false } && managedProcessKind == "workflow")
+                throw new InvalidOperationException("Önce çalışan Build/Test iş akışını durdurun.");
             StopManagedProcess();
             StartServer();
         }
@@ -630,18 +880,73 @@ internal sealed class WorkspaceForm : Form
                 throw new TimeoutException("Başlatılan yerel sunucu süreci 3 saniye içinde kapanmadı.");
         }
         managedProcess = null;
+        var targetStatus = managedProcessStatus;
+        var targetLog = managedProcessLog;
+        var description = managedProcessDescription;
+        managedProcessStatus = null;
+        managedProcessLog = null;
+        managedProcessDescription = "";
+        managedProcessKind = "";
         process.Dispose();
-        serverStatus.Text = "Yerel sunucu durduruldu.";
-        AppendLog("Yalnızca bu pencerede başlatılan süreç durduruldu.");
+        if (targetStatus is not null)
+            targetStatus.Text = $"{description} durduruldu.";
+        if (targetLog is not null)
+            AppendLog(targetLog, $"Yalnızca bu pencerede başlatılan {description} süreci durduruldu.");
     }
 
-    private void AppendProcessOutput(string label, string? line)
+    private void LaunchConfiguredProcess(
+        string executable, string workingDirectoryPath, string fixedArguments,
+        string description, string kind, RichTextBox output, Label status)
+    {
+        if (managedProcess is { HasExited: false })
+            throw new InvalidOperationException("Bu pencerede başka bir yönetilen süreç zaten çalışıyor.");
+        managedProcess?.Dispose();
+        managedProcess = null;
+        managedProcessStatus = null;
+        managedProcessLog = null;
+        managedProcessDescription = "";
+        managedProcessKind = "";
+        var startInfo = WorkspaceSecurity.CreateConfiguredProcessStartInfo(
+            executable, workingDirectoryPath, fixedArguments);
+        var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+        process.OutputDataReceived += (_, eventArgs) => AppendProcessOutput(output, "OUT", eventArgs.Data);
+        process.ErrorDataReceived += (_, eventArgs) => AppendProcessOutput(output, "ERR", eventArgs.Data);
+        process.Exited += (_, _) =>
+        {
+            if (IsDisposed || closing)
+                return;
+            BeginInvoke(new Action(() =>
+            {
+                if (ReferenceEquals(managedProcess, process))
+                {
+                    status.Text = $"{description} durdu (kod {process.ExitCode}).";
+                    AppendLog(output, $"Süreç durdu (çıkış kodu {process.ExitCode}).");
+                }
+            }));
+        };
+        if (!process.Start())
+        {
+            process.Dispose();
+            throw new InvalidOperationException("Yapılandırılmış süreç başlatılamadı.");
+        }
+        managedProcess = process;
+        managedProcessStatus = status;
+        managedProcessLog = output;
+        managedProcessDescription = description;
+        managedProcessKind = kind;
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        status.Text = $"{description} çalışıyor (PID {process.Id}).";
+        AppendLog(output, $"Başlatıldı: {startInfo.FileName}");
+    }
+
+    private void AppendProcessOutput(RichTextBox output, string label, string? line)
     {
         if (line is null || IsDisposed || closing)
             return;
         try
         {
-            BeginInvoke(new Action(() => AppendLog($"{label}: {line}")));
+            BeginInvoke(new Action(() => AppendLog(output, $"{label}: {line}")));
         }
         catch (InvalidOperationException)
         {
@@ -649,17 +954,20 @@ internal sealed class WorkspaceForm : Form
     }
 
     private void AppendLog(string message)
+        => AppendLog(serverLog, message);
+
+    private void AppendLog(RichTextBox output, string message)
     {
-        if (serverLog.IsDisposed)
+        if (output.IsDisposed)
             return;
-        serverLog.AppendText($"{DateTime.Now:HH:mm:ss} {message}{Environment.NewLine}");
-        if (serverLog.TextLength > 32_000)
+        output.AppendText($"{DateTime.Now:HH:mm:ss} {message}{Environment.NewLine}");
+        if (output.TextLength > 32_000)
         {
-            serverLog.Select(0, serverLog.TextLength - 24_000);
-            serverLog.SelectedText = "";
+            output.Select(0, output.TextLength - 24_000);
+            output.SelectedText = "";
         }
-        serverLog.SelectionStart = serverLog.TextLength;
-        serverLog.ScrollToCaret();
+        output.SelectionStart = output.TextLength;
+        output.ScrollToCaret();
     }
 
     private void SaveSettings()
@@ -674,6 +982,12 @@ internal sealed class WorkspaceForm : Form
     {
         serverStatus.Text = message;
         AppendLog(message);
+    }
+
+    private void ReportWorkflow(string message)
+    {
+        workflowStatus.Text = message;
+        AppendLog(workflowLog, message);
     }
 }
 

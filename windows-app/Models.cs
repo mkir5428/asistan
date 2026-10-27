@@ -14,11 +14,22 @@ internal sealed class AppState
     public string WorkspaceRoot { get; set; } = "";
     public List<string> WorkspaceFiles { get; set; } = [];
     public List<ServerProfile> ServerProfiles { get; set; } = [];
+    public List<ProjectWorkflow> ProjectWorkflows { get; set; } = [];
 }
 
 internal sealed class ServerProfile
 {
     public string Name { get; set; } = "";
+    public string WorkspaceRoot { get; set; } = "";
+    public string ExecutablePath { get; set; } = "";
+    public string WorkingDirectory { get; set; } = "";
+    public string Arguments { get; set; } = "";
+}
+
+internal sealed class ProjectWorkflow
+{
+    public string Name { get; set; } = "";
+    public string Kind { get; set; } = "test";
     public string WorkspaceRoot { get; set; } = "";
     public string ExecutablePath { get; set; } = "";
     public string WorkingDirectory { get; set; } = "";

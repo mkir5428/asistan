@@ -18,7 +18,8 @@ var checks = new List<(string Name, Action Run)>
     ("Plan yanıtı tüm gönderilen dosyaları bir kez içermelidir", CheckWorkspacePlanValidation),
     ("Plan API talimat, dosya ve gerçek JSON istek sınırlarını uygular", CheckWorkspacePlanLimits),
     ("Plan değişiklikleri atomik yazılır ve eski dosya sürümü korunur", CheckWorkspaceAtomicWrite),
-    ("Yerel sunucu profilleri çalışma alanı dışı çalışma klasörünü ve kabukları reddeder", CheckServerProfiles)
+    ("Yerel sunucu profilleri çalışma alanı dışı çalışma klasörünü ve kabukları reddeder", CheckServerProfiles),
+    ("Build/Test iş akışları kabuk başlatmaz ve çalışma alanı dışı klasörleri reddeder", CheckProjectWorkflows)
 };
 
 foreach (var check in checks)
@@ -352,6 +353,54 @@ static void CheckServerProfiles()
         profile.ExecutablePath = Path.Combine(root, "powershell.exe");
         File.WriteAllText(profile.ExecutablePath, "test");
         Throws<InvalidOperationException>(() => WorkspaceSecurity.ValidateServerProfile(profile, root));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+        Directory.Delete(outside, recursive: true);
+    }
+}
+
+static void CheckProjectWorkflows()
+{
+    var root = Path.Combine(Path.GetTempPath(), "cip-workflow-" + Guid.NewGuid().ToString("N"));
+    var outside = Path.Combine(Path.GetTempPath(), "cip-workflow-outside-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    Directory.CreateDirectory(outside);
+    var executable = Path.Combine(root, "builder.exe");
+    File.WriteAllText(executable, "test");
+    var workflow = new ProjectWorkflow
+    {
+        Name = "Project tests",
+        Kind = "test",
+        WorkspaceRoot = root,
+        ExecutablePath = executable,
+        WorkingDirectory = root,
+        Arguments = "--test"
+    };
+    try
+    {
+        WorkspaceSecurity.ValidateProjectWorkflow(workflow, root);
+        var startInfo = WorkspaceSecurity.CreateConfiguredProcessStartInfo(
+            executable, root, "--message \"literal & not a shell\"");
+        False(startInfo.UseShellExecute);
+        True(startInfo.RedirectStandardOutput && startInfo.RedirectStandardError);
+        Equal(executable, startInfo.FileName);
+        Equal(root, startInfo.WorkingDirectory);
+        Equal("--message \"literal & not a shell\"", startInfo.Arguments);
+
+        workflow.WorkingDirectory = outside;
+        Throws<UnauthorizedAccessException>(() => WorkspaceSecurity.ValidateProjectWorkflow(workflow, root));
+        workflow.WorkingDirectory = root;
+        workflow.Kind = "custom";
+        Throws<InvalidOperationException>(() => WorkspaceSecurity.ValidateProjectWorkflow(workflow, root));
+        workflow.Kind = "build";
+        workflow.ExecutablePath = Path.Combine(root, "cmd.exe");
+        File.WriteAllText(workflow.ExecutablePath, "test");
+        Throws<InvalidOperationException>(() => WorkspaceSecurity.ValidateProjectWorkflow(workflow, root));
+        workflow.ExecutablePath = executable;
+        workflow.Arguments = "--run" + Environment.NewLine + "second";
+        Throws<ArgumentException>(() => WorkspaceSecurity.ValidateProjectWorkflow(workflow, root));
     }
     finally
     {

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Diagnostics;
 
 namespace Cip.Windows;
 
@@ -175,14 +176,48 @@ internal static class WorkspaceSecurity
         var root = ValidateWorkspaceRoot(workspaceRoot);
         if (!string.Equals(ValidateWorkspaceRoot(profile.WorkspaceRoot), root, StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("Profilin çalışma alanı seçili çalışma alanıyla eşleşmiyor.");
-        if (string.IsNullOrWhiteSpace(profile.Name) || profile.Name.Trim().Length > 50
-            || profile.Name.Any(char.IsControl))
-            throw new ArgumentException("Sunucu profili için 1-50 karakterlik bir ad girin.");
-        if (profile.Arguments.Length > 4096 || profile.Arguments.Any(char.IsControl))
-            throw new ArgumentException("Başlatma bağımsız değişkenleri geçersiz veya çok uzun.");
+        ValidateName(profile.Name);
+        ValidateExecutableSettings(profile.ExecutablePath, profile.WorkingDirectory, profile.Arguments, root);
+    }
 
-        var executable = Path.GetFullPath(profile.ExecutablePath);
-        var workingDirectory = Path.GetFullPath(profile.WorkingDirectory);
+    public static void ValidateProjectWorkflow(ProjectWorkflow workflow, string workspaceRoot)
+    {
+        var root = ValidateWorkspaceRoot(workspaceRoot);
+        if (!string.Equals(ValidateWorkspaceRoot(workflow.WorkspaceRoot), root, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("İş akışının çalışma alanı seçili çalışma alanıyla eşleşmiyor.");
+        ValidateName(workflow.Name);
+        if (workflow.Kind is not ("build" or "test"))
+            throw new InvalidOperationException("Yalnızca sabit Build veya Test iş akışları çalıştırılabilir.");
+        ValidateExecutableSettings(workflow.ExecutablePath, workflow.WorkingDirectory, workflow.Arguments, root);
+    }
+
+    public static ProcessStartInfo CreateConfiguredProcessStartInfo(
+        string executablePath, string workingDirectory, string arguments) => new()
+    {
+        FileName = Path.GetFullPath(executablePath),
+        WorkingDirectory = Path.GetFullPath(workingDirectory),
+        Arguments = arguments,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        StandardOutputEncoding = Encoding.UTF8,
+        StandardErrorEncoding = Encoding.UTF8
+    };
+
+    private static void ValidateName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.Trim().Length > 50 || name.Any(char.IsControl))
+            throw new ArgumentException("Profil için 1-50 karakterlik bir ad girin.");
+    }
+
+    private static void ValidateExecutableSettings(
+        string executablePath, string workingDirectoryPath, string arguments, string root)
+    {
+        if (arguments.Length > 4096 || arguments.Any(char.IsControl))
+            throw new ArgumentException("Başlatma bağımsız değişkenleri geçersiz veya çok uzun.");
+        var executable = Path.GetFullPath(executablePath);
+        var workingDirectory = Path.GetFullPath(workingDirectoryPath);
         if (!string.Equals(Path.GetExtension(executable), ".exe", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Profil yalnızca açıkça seçilmiş bir Windows .exe dosyasını başlatabilir.");
         if (IsShellExecutable(Path.GetFileName(executable)))

@@ -135,13 +135,19 @@ geçici dosyaya yazılıp atomik olarak değiştirilir. Planlanan kod veya komut
 çalıştırılmaz. Dosya seçim sınırları nedeniyle büyük/ikili dosyalar
 planlamaya gönderilemez.
 
+**Derleme/Test** sekmesinde kullanıcı tarafından kaydedilmiş `build` veya `test`
+iş akışlarından biri açıkça seçilip başlatılabilir. Her iş akışı sabit bir
+`.exe`, çalışma alanı içindeki çalışma klasörü ve sabit argümanlardan oluşur;
+komut kabuğu başlatılmaz ve model yanıtı bu ayarları değiştiremez. Çıktı,
+durum ve durdurma aynı pencerede görünür.
+
 Yerel sunucu profilleri de elle oluşturulur ve seçilir. Profil sabit bir `.exe`,
 seçili çalışma alanı içindeki çalışma klasörü ve sabit argümanlardan oluşur;
 komut kabukları profil olarak reddedilir. Başlatma, durdurma ve yeniden
 başlatma işlemleri yalnızca bu pencerede başlatılmış süreç için görünür
 durum/çıktı günlüğüyle yapılır. Uygulama kapanırken başlattığı süreç ağacını
-durdurur; profil otomatik başlatılmaz. Bu özellik Render veya başka bir bulut
-sunucusunu yönetmez.
+durdurur; profiller otomatik çalıştırılmaz. Bu özellik Render veya başka bir
+bulut sunucusunu yönetmez.
 
 ## Doğrulamalar
 
@@ -154,4 +160,5 @@ dotnet run --project .\windows-app\tests\Cip.Windows.Tests.csproj
 Kontroller HTTPS zorunluluğunu, klasör sınırlarını, Windows dosya adlarını,
 eşleştirme isteğinin kimlik bilgisi göndermemesini, eylem isteğinin PC token'ını
 kullanmasını, plan API'sinin veri biçimi/yol/boyut sınırlarını, güvenli dosya
-uygulamasını ve yerel sunucu profili sınırlarını kapsar.
+uygulamasını, yerel sunucu profili sınırlarını ve Build/Test iş akışlarının
+kabuksuz başlatma ve çalışma klasörü sınırlarını kapsar.
