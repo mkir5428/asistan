@@ -5,8 +5,8 @@ Uç noktalar:
   GET  /                        -> sağlık/teşhis sayfası
   GET  /komut?text=...&gecmis=...&profil=...    -> sohbetli AI komutu
   POST /ses (multipart: file, + format=json)    -> ses (Groq) -> komut
-  GET  /cevir?text=...&dil=...  -> çeviri (Claude)
-  GET  /ozet?text=...&mod=...   -> özetleme (Claude)
+  GET/POST /cevir?text=...&dil=...  -> çeviri (Claude)
+  GET/POST /ozet?text=...&mod=...   -> özetleme (Claude)
   GET  /hava?sehir=...          -> hava durumu (open-meteo, anahtarsız)
   GET  /hesap?ifade=...         -> güvenli hesap makinesi
   GET  /seslendir?metin=...     -> doğal Türkçe ses (edge-tts, mp3)
@@ -19,8 +19,10 @@ eksik servis istek anında anlaşılır Türkçe mesaj döner.
 import asyncio
 import io
 import ast
+import hmac
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -32,7 +34,7 @@ from flask import Flask, Response, jsonify, request
 from tuya_connector import TuyaOpenAPI
 import anthropic
 
-SURUM = "4.3"
+SURUM = "4.4"
 
 # ==================== LOG ====================
 logging.basicConfig(
@@ -43,10 +45,12 @@ logging.basicConfig(
 log = logging.getLogger("cip-sunucu")
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 25_000_000
 
 # ==================== ENV (tembel) ====================
 
 GEREKLILER = [
+    "ASISTAN_API_KEY",
     "ANTHROPIC_API_KEY",
     "GROQ_API_KEY",
     "TUYA_CLIENT_ID",
@@ -258,11 +262,62 @@ IZINLI_DUGUMLER = (
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv,
     ast.USub, ast.UAdd,
 )
+MAX_HESAP_IFADE_UZUNLUGU = 200
+MAX_HESAP_DUGUMU = 100
+MAX_HESAP_MUTLAK_DEGERI = 1e100
+
+
+def _hesapla_dugum(dugum):
+    if isinstance(dugum, ast.Constant):
+        if type(dugum.value) not in (int, float):
+            raise ValueError("sayı olmayan sabit")
+        sonuc = dugum.value
+    elif isinstance(dugum, ast.UnaryOp):
+        deger = _hesapla_dugum(dugum.operand)
+        if isinstance(dugum.op, ast.USub):
+            sonuc = -deger
+        elif isinstance(dugum.op, ast.UAdd):
+            sonuc = deger
+        else:
+            raise ValueError("yasaklı işlem")
+    elif isinstance(dugum, ast.BinOp):
+        sol = _hesapla_dugum(dugum.left)
+        sag = _hesapla_dugum(dugum.right)
+        if isinstance(dugum.op, ast.Add):
+            sonuc = sol + sag
+        elif isinstance(dugum.op, ast.Sub):
+            sonuc = sol - sag
+        elif isinstance(dugum.op, ast.Mult):
+            sonuc = sol * sag
+        elif isinstance(dugum.op, ast.Div):
+            sonuc = sol / sag
+        elif isinstance(dugum.op, ast.Pow):
+            if abs(sag) > 100:
+                raise ValueError("üs çok büyük")
+            sonuc = sol ** sag
+        elif isinstance(dugum.op, ast.Mod):
+            sonuc = sol % sag
+        elif isinstance(dugum.op, ast.FloorDiv):
+            sonuc = sol // sag
+        else:
+            raise ValueError("yasaklı işlem")
+    elif isinstance(dugum, ast.Expression):
+        return _hesapla_dugum(dugum.body)
+    else:
+        raise ValueError("yasaklı ifade")
+
+    if type(sonuc) not in (int, float):
+        raise ValueError("geçersiz sonuç")
+    if (isinstance(sonuc, float) and not math.isfinite(sonuc)) or abs(sonuc) > MAX_HESAP_MUTLAK_DEGERI:
+        raise ValueError("sonuç çok büyük")
+    return sonuc
 
 
 def guvenli_hesap(ifade: str):
     """Sadece aritmetik: harf/fonksiyon/şüpheli şey varsa reddeder."""
     temiz = ifade.strip()
+    if len(temiz) > MAX_HESAP_IFADE_UZUNLUGU:
+        raise ValueError("ifade çok uzun")
     for desen, isaret in KELIME_ISLEMLER:
         temiz = desen.sub(isaret, temiz)
     temiz = temiz.replace("x", "*").replace("X", "*").replace(",", ".")
@@ -270,16 +325,13 @@ def guvenli_hesap(ifade: str):
     if not temiz or not re.search(r"\d", temiz):
         raise ValueError("sayı yok")
     agac = ast.parse(temiz, mode="eval")
-    for dugum in ast.walk(agac):
+    dugumler = list(ast.walk(agac))
+    if len(dugumler) > MAX_HESAP_DUGUMU:
+        raise ValueError("ifade çok karmaşık")
+    for dugum in dugumler:
         if not isinstance(dugum, IZINLI_DUGUMLER):
             raise ValueError("yasaklı ifade")
-        if isinstance(dugum, ast.Constant) and not isinstance(dugum.value, (int, float)):
-            raise ValueError("sayı olmayan sabit")
-    sonuc = eval(  # noqa: S307 — AST beyaz listesiyle sınırlı
-        compile(agac, "<hesap>", "eval"),
-        {"__builtins__": {}},
-        {},
-    )
+    sonuc = _hesapla_dugum(agac)
     if isinstance(sonuc, float) and sonuc.is_integer():
         sonuc = int(sonuc)
     return temiz, sonuc
@@ -402,8 +454,34 @@ def isle_komut(metin: str, gecmis: list = None, profil: str = ""):
 # ==================== UÇ NOKTALAR ====================
 
 
-def duz_metin(mesaj: str):
-    return mesaj, 200, {"Content-Type": "text/plain; charset=utf-8"}
+def duz_metin(mesaj: str, durum: int = 200, basliklar: dict = None):
+    baslik = {"Content-Type": "text/plain; charset=utf-8"}
+    if basliklar:
+        baslik.update(basliklar)
+    return mesaj, durum, baslik
+
+
+@app.before_request
+def kimlik_dogrula():
+    if request.path == "/" and request.method == "GET":
+        return None
+
+    beklenen = os.environ.get("ASISTAN_API_KEY", "").strip()
+    if not beklenen:
+        return duz_metin("Sunucu yapılandırma hatası: ASISTAN_API_KEY ayarlanmamış.", 503)
+
+    sema, ayirac, verilen = request.headers.get("Authorization", "").partition(" ")
+    if (
+        not ayirac
+        or sema.lower() != "bearer"
+        or not hmac.compare_digest(verilen.strip().encode("utf-8"), beklenen.encode("utf-8"))
+    ):
+        return duz_metin(
+            "Yetkisiz istek.",
+            401,
+            {"WWW-Authenticate": "Bearer"},
+        )
+    return None
 
 
 def oturum_id() -> str:
@@ -431,11 +509,12 @@ def saglik():
 @app.route("/komut", methods=["GET", "POST"])
 def komut():
     metin = request.values.get("text", "")
-    log.info("Komut: %r (gecmis=%d mesaj, profil=%d harf)", metin, len(gecmisten_mesajlar(oturum_id())), len(profil_metni()))
+    gecmis = gecmisten_mesajlar(oturum_id())
+    log.info("Komut alındı (karakter=%d, geçmiş=%d mesaj, profil=%d harf)", len(metin), len(gecmis), len(profil_metni()))
     if bellek_temizleme_istegi(metin):
         sohbet_temizle(oturum_id())
         return duz_metin("Sohbet hafızasını temizledim, yeni bir sayfa açtık.")
-    cevap = isle_komut(metin, gecmisten_mesajlar(oturum_id()), profil_metni())[0]
+    cevap = isle_komut(metin, gecmis, profil_metni())[0]
     if not cevap.startswith("Cevap üretirken hata"):
         sohbet_ekle(oturum_id(), metin, cevap)
     return duz_metin(cevap)
@@ -464,7 +543,7 @@ def ses():
             return jsonify({"transkript": "", "cevap": f"Sesi anlayamadım: {e}", "temizlendi": False})
         return duz_metin(f"Sesi anlayamadım: {e}")
 
-    log.info("Transkript: %r", metin)
+    log.info("Ses transkripti alındı (karakter=%d)", len(metin))
     temizlik = bellek_temizleme_istegi(metin)
     if temizlik:
         sohbet_temizle(oturum_id())
@@ -486,13 +565,13 @@ CEVIRI_GOREVI = (
 )
 
 
-@app.route("/cevir", methods=["GET"])
+@app.route("/cevir", methods=["GET", "POST"])
 def cevir():
-    metin = (request.args.get("text", "") or "").strip()
+    metin = (request.values.get("text", "") or "").strip()
     if not metin:
         return duz_metin("Çevrilecek metin boş. Örnek: /cevir?text=merhaba&dil=ingilizce")
 
-    dil = (request.args.get("dil", "") or "").strip().lower()
+    dil = (request.values.get("dil", "") or "").strip().lower()
     dil_adi = dil.capitalize() if dil else "İngilizce"
 
     try:
@@ -515,13 +594,13 @@ OZET_MODLARI = {
 }
 
 
-@app.route("/ozet", methods=["GET"])
+@app.route("/ozet", methods=["GET", "POST"])
 def ozet():
-    metin = (request.args.get("text", "") or "").strip()
+    metin = (request.values.get("text", "") or "").strip()
     if len(metin) < 80:
         return duz_metin("Özetlenecek metin çok kısa. /ozet?text=<uzun metin>&mod=kisa|orta|madde")
 
-    mod = tr_den_ascii(request.args.get("mod", "orta"))
+    mod = tr_den_ascii(request.values.get("mod", "orta"))
     talimat = OZET_MODLARI.get(mod, OZET_MODLARI["orta"])
 
     try:
