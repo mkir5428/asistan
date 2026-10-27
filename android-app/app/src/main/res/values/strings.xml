@@ -20,10 +20,6 @@
     <string name="record_stop_button">Kaydı bitir</string>
     <string name="record_stop_content_description">Ses kaydını bitir ve gönder</string>
     <string name="microphone_permission_note">Mikrofon izni gerekir</string>
-    <string name="device_action_file">Dosya seç</string>
-    <string name="device_action_contact">Kişi ara</string>
-    <string name="device_action_sms">SMS yaz</string>
-    <string name="device_action_calendar">Takvim</string>
     <string name="transfer_title">Güvenli dosya aktarımı</string>
     <string name="transfer_pair_button">Eşleştir</string>
     <string name="transfer_pair_content_description">Bilgisayarla güvenli dosya aktarımını eşleştir</string>
