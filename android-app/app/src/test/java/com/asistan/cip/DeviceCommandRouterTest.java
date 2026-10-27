@@ -14,6 +14,10 @@ public class DeviceCommandRouterTest {
                 DeviceCommandRouter.route("takvime etkinlik ekle").action);
         assertEquals(DeviceCommandRouter.Action.PICK_PHONE_TO_CALL,
                 DeviceCommandRouter.route("kişiyi ara").action);
+        assertEquals(DeviceCommandRouter.Action.PICK_PHONE_FOR_SMS,
+                DeviceCommandRouter.route("sms gönder").action);
+        assertEquals(DeviceCommandRouter.Action.CREATE_CALENDAR_EVENT,
+                DeviceCommandRouter.route("takvim etkinliği oluştur").action);
         assertNull(DeviceCommandRouter.route("telefonumdaki her şeyi aç"));
     }
 

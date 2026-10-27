@@ -10,7 +10,12 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.database.Cursor;
+import android.animation.ValueAnimator;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.media.MediaRecorder;
 import android.net.Uri;
 import android.os.Build;
@@ -24,7 +29,9 @@ import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.util.Base64;
 import android.widget.Button;
 import android.widget.EditText;
@@ -89,9 +96,13 @@ public final class MainActivity extends Activity {
     private Button sendButton;
     private Button recordButton;
     private Button wakeWordButton;
+    private TextView wakeIndicator;
     private TextView wakeStatus;
     private TextView transferStatus;
+    private Button transferToggleButton;
+    private LinearLayout transferContent;
     private LinearLayout transferActionsContainer;
+    private LinearLayout transferCard;
     private MediaRecorder recorder;
     private File recordingFile;
     private boolean recording;
@@ -102,6 +113,7 @@ public final class MainActivity extends Activity {
     private boolean transferPollInProgress;
     private boolean transferPollEnabled;
     private boolean transferUploadBusy;
+    private boolean transferExpanded;
     private TransferCredentialStore transferCredentialStore;
     private final WindowsActionApproval transferApproval = new AndroidBiometricApproval();
     private final Handler transferHandler = new Handler(Looper.getMainLooper());
@@ -171,136 +183,298 @@ public final class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(16), dp(12), dp(16), dp(12));
-        root.setBackgroundColor(0xFFF4F7F6);
+        root.setBackgroundColor(0xFF080D14);
 
         LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(20), dp(16), dp(16), dp(16));
+        GradientDrawable headerBackground = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR, new int[]{0xFF142333, 0xFF075F70});
+        headerBackground.setCornerRadius(dp(26));
+        header.setBackground(headerBackground);
+        header.setElevation(dp(4));
+        LinearLayout titleBlock = new LinearLayout(this);
+        titleBlock.setOrientation(LinearLayout.VERTICAL);
         TextView title = new TextView(this);
-        title.setText("Çip Asistan");
-        title.setTextSize(24);
-        title.setTextColor(0xFF124E43);
+        title.setText(R.string.screen_title);
+        title.setTextSize(28);
+        title.setTextColor(Color.WHITE);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        titleBlock.addView(title);
+        TextView subtitle = new TextView(this);
+        subtitle.setText(R.string.screen_subtitle);
+        subtitle.setTextSize(13);
+        subtitle.setTextColor(0xFFE0F4EF);
+        titleBlock.addView(subtitle);
+        header.addView(titleBlock, new LinearLayout.LayoutParams(0, -2, 1));
         Button settings = new Button(this);
-        settings.setText("Ayarlar");
+        settings.setText(R.string.settings_button);
+        styleButton(settings, 0x33FFFFFF, Color.WHITE, 0x66FFFFFF);
+        settings.setContentDescription(getString(R.string.settings_content_description));
         settings.setOnClickListener(view -> showSettings());
         header.addView(settings);
         root.addView(header);
 
-        TextView intro = new TextView(this);
-        intro.setText("Yaz, ses gönder veya “Hey Çip” diyerek cihazda dinlemeyi başlat. "
-                + "Uyandırma sözcüğü konuşmacı kimliğini doğrulamaz.");
-        intro.setTextSize(14);
-        intro.setTextColor(0xFF52625F);
-        root.addView(intro);
-
         LinearLayout wakeControls = new LinearLayout(this);
         wakeControls.setGravity(Gravity.CENTER_VERTICAL);
+        wakeControls.setPadding(dp(14), dp(8), dp(8), dp(8));
+        wakeControls.setBackground(surfaceBackground());
+        wakeControls.setElevation(dp(2));
+        wakeIndicator = new TextView(this);
+        wakeIndicator.setText("●");
+        wakeIndicator.setTextSize(14);
+        wakeIndicator.setTextColor(0xFF607585);
+        wakeIndicator.setGravity(Gravity.CENTER);
+        wakeControls.addView(wakeIndicator, new LinearLayout.LayoutParams(dp(28), dp(48)));
         wakeStatus = new TextView(this);
-        wakeStatus.setText("Sürekli dinleme kapalı.");
+        wakeStatus.setText(R.string.wake_status_off);
         wakeStatus.setTextSize(13);
-        wakeStatus.setTextColor(0xFF52625F);
+        wakeStatus.setTextColor(0xFFB7C7D2);
+        wakeStatus.setMaxLines(2);
+        wakeStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         wakeControls.addView(wakeStatus, new LinearLayout.LayoutParams(0, -2, 1));
         wakeWordButton = new Button(this);
-        wakeWordButton.setText("Hey Çip'i aç");
+        wakeWordButton.setText(R.string.wake_button_start);
+        styleButton(wakeWordButton, 0xFF17362F, 0xFF70E7BD, 0xFF285B4D);
         wakeWordButton.setOnClickListener(view -> toggleWakeWordService());
         wakeControls.addView(wakeWordButton);
-        root.addView(wakeControls);
+        LinearLayout.LayoutParams wakeParams = new LinearLayout.LayoutParams(-1, -2);
+        wakeParams.topMargin = dp(12);
+        root.addView(wakeControls, wakeParams);
+        TextView wakePrivacyNote = new TextView(this);
+        wakePrivacyNote.setText(R.string.wake_privacy_note);
+        wakePrivacyNote.setTextSize(11);
+        wakePrivacyNote.setTextColor(0xFF8293A0);
+        wakePrivacyNote.setPadding(dp(6), dp(4), dp(6), 0);
+        root.addView(wakePrivacyNote);
+        root.addView(new View(this), new LinearLayout.LayoutParams(-1, dp(12)));
+
+        LinearLayout chatPanel = new LinearLayout(this);
+        chatPanel.setOrientation(LinearLayout.VERTICAL);
+        chatPanel.setPadding(dp(14), dp(12), dp(14), dp(10));
+        chatPanel.setBackground(surfaceBackground());
+        chatPanel.setElevation(dp(2));
+        LinearLayout chatHeader = new LinearLayout(this);
+        chatHeader.setGravity(Gravity.CENTER_VERTICAL);
+        TextView conversationTitle = new TextView(this);
+        conversationTitle.setText(R.string.conversation_title);
+        conversationTitle.setTextSize(17);
+        conversationTitle.setTextColor(0xFFE8F1F6);
+        conversationTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        chatHeader.addView(conversationTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView onlineLabel = new TextView(this);
+        onlineLabel.setText(R.string.conversation_ready);
+        onlineLabel.setTextSize(12);
+        onlineLabel.setTextColor(0xFF65E2B6);
+        chatHeader.addView(onlineLabel);
+        chatPanel.addView(chatHeader);
 
         conversation = new LinearLayout(this);
         conversation.setOrientation(LinearLayout.VERTICAL);
-        conversation.setPadding(dp(12), dp(10), dp(12), dp(10));
+        conversation.setPadding(dp(4), dp(12), dp(4), dp(8));
         conversationScroll = new ScrollView(this);
         conversationScroll.setFillViewport(true);
-        conversationScroll.setBackgroundColor(0xFFFFFFFF);
+        conversationScroll.setClipToPadding(false);
         conversationScroll.addView(conversation);
         LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(-1, 0, 1);
-        scrollParams.topMargin = dp(12);
-        scrollParams.bottomMargin = dp(12);
-        root.addView(conversationScroll, scrollParams);
-        addMessage("Çip", "Hazırım. Bana bir şey sorabilir veya ampulünü kontrol etmemi isteyebilirsin.");
+        scrollParams.topMargin = dp(4);
+        chatPanel.addView(conversationScroll, scrollParams);
+        LinearLayout.LayoutParams chatParams = new LinearLayout.LayoutParams(-1, 0, 1);
+        chatParams.bottomMargin = dp(12);
+        root.addView(chatPanel, chatParams);
+        addMessage("Çip", getString(R.string.welcome_message));
 
+        LinearLayout composer = new LinearLayout(this);
+        composer.setOrientation(LinearLayout.VERTICAL);
+        composer.setPadding(dp(8), dp(8), dp(8), dp(8));
+        composer.setBackground(surfaceBackground());
+        composer.setElevation(dp(2));
+        LinearLayout messageRow = new LinearLayout(this);
+        messageRow.setGravity(Gravity.CENTER_VERTICAL);
         messageInput = new EditText(this);
-        messageInput.setHint("Mesajını yaz...");
+        messageInput.setHint(R.string.message_hint);
         messageInput.setMinLines(1);
         messageInput.setMaxLines(4);
         messageInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                 | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         messageInput.setImeOptions(EditorInfo.IME_ACTION_SEND);
-        root.addView(messageInput, new LinearLayout.LayoutParams(-1, -2));
+        messageInput.setTextSize(16);
+        messageInput.setPadding(dp(12), dp(10), dp(12), dp(10));
+        messageInput.setTextColor(0xFFE8F1F6);
+        messageInput.setHintTextColor(0xFF899BA8);
+        messageInput.setBackground(roundedBackground(0xFF17222E, dp(18), 0xFF2A3A49));
+        messageInput.setContentDescription(getString(R.string.message_content_description));
+        messageRow.addView(messageInput, new LinearLayout.LayoutParams(0, -2, 1));
+        sendButton = new Button(this);
+        sendButton.setText(R.string.send_button);
+        styleButton(sendButton, 0xFF087A69, Color.WHITE, 0x00FFFFFF);
+        sendButton.setContentDescription(getString(R.string.send_content_description));
+        sendButton.setOnClickListener(view -> sendText());
+        LinearLayout.LayoutParams sendParams = new LinearLayout.LayoutParams(-2, -2);
+        sendParams.leftMargin = dp(8);
+        messageRow.addView(sendButton, sendParams);
+        composer.addView(messageRow);
+        messageInput.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_SEND) {
+                sendText();
+                return true;
+            }
+            return false;
+        });
 
         LinearLayout actions = new LinearLayout(this);
-        actions.setGravity(Gravity.CENTER);
-        sendButton = new Button(this);
-        sendButton.setText("Gönder");
-        sendButton.setOnClickListener(view -> sendText());
-        actions.addView(sendButton, new LinearLayout.LayoutParams(0, -2, 1));
+        actions.setGravity(Gravity.CENTER_VERTICAL);
         recordButton = new Button(this);
-        recordButton.setText("Ses kaydet");
+        recordButton.setText(R.string.record_button);
+        styleButton(recordButton, 0xFF38251F, 0xFFFFB18D, 0xFF654235);
+        recordButton.setContentDescription(getString(R.string.record_content_description));
         recordButton.setOnClickListener(view -> toggleRecording());
-        LinearLayout.LayoutParams recordParams = new LinearLayout.LayoutParams(0, -2, 1);
-        recordParams.leftMargin = dp(8);
-        actions.addView(recordButton, recordParams);
-        root.addView(actions);
+        actions.addView(recordButton, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView privacyNote = new TextView(this);
+        privacyNote.setText(R.string.microphone_permission_note);
+        privacyNote.setTextSize(11);
+        privacyNote.setTextColor(0xFF8293A0);
+        privacyNote.setGravity(Gravity.CENTER);
+        actions.addView(privacyNote, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(-1, -2);
+        actionsParams.topMargin = dp(6);
+        composer.addView(actions, actionsParams);
+        LinearLayout.LayoutParams composerParams = new LinearLayout.LayoutParams(-1, -2);
+        composerParams.bottomMargin = dp(10);
+        root.addView(composer, composerParams);
 
-        LinearLayout deviceActions = new LinearLayout(this);
-        deviceActions.setGravity(Gravity.CENTER);
-        addDeviceActionButton(deviceActions, "Dosya seç", DeviceCommandRouter.Action.OPEN_FILE);
-        addDeviceActionButton(deviceActions, "Kişi ara", DeviceCommandRouter.Action.PICK_PHONE_TO_CALL);
-        addDeviceActionButton(deviceActions, "SMS", DeviceCommandRouter.Action.PICK_PHONE_FOR_SMS);
-        addDeviceActionButton(deviceActions, "Takvim", DeviceCommandRouter.Action.CREATE_CALENDAR_EVENT);
-        root.addView(deviceActions);
-
+        transferCard = new LinearLayout(this);
+        transferCard.setOrientation(LinearLayout.VERTICAL);
+        transferCard.setPadding(dp(12), dp(8), dp(12), dp(8));
+        transferCard.setBackground(surfaceBackground());
+        transferCard.setElevation(dp(2));
         LinearLayout transferHeader = new LinearLayout(this);
         transferHeader.setGravity(Gravity.CENTER_VERTICAL);
         TextView transferTitle = new TextView(this);
-        transferTitle.setText("Bilgisayar ile güvenli aktarım");
-        transferTitle.setTextColor(0xFF124E43);
+        transferTitle.setText(R.string.transfer_title);
+        transferTitle.setTextSize(14);
+        transferTitle.setTextColor(0xFFE8F1F6);
         transferTitle.setTypeface(null, android.graphics.Typeface.BOLD);
         transferHeader.addView(transferTitle, new LinearLayout.LayoutParams(0, -2, 1));
         Button pairButton = new Button(this);
-        pairButton.setText("Eşleştir");
+        pairButton.setText(R.string.transfer_pair_button);
+        styleButton(pairButton, 0xFF1D3140, 0xFFB7D7E8, 0xFF304A5C);
+        pairButton.setContentDescription(getString(R.string.transfer_pair_content_description));
         pairButton.setOnClickListener(view -> showTransferPairingDialog());
         transferHeader.addView(pairButton);
-        root.addView(transferHeader);
+        transferToggleButton = new Button(this);
+        transferToggleButton.setText(R.string.transfer_details_show);
+        styleButton(transferToggleButton, 0xFF202C37, 0xFFB7C7D2, 0xFF344451);
+        transferToggleButton.setOnClickListener(view -> setTransferExpanded(!transferExpanded));
+        transferHeader.addView(transferToggleButton);
+        transferCard.addView(transferHeader);
 
         transferStatus = new TextView(this);
-        transferStatus.setText("Bilgisayar eşleşmesi yok.");
-        transferStatus.setTextSize(13);
-        transferStatus.setTextColor(0xFF52625F);
-        root.addView(transferStatus);
+        transferStatus.setText(R.string.transfer_status_unpaired);
+        transferStatus.setTextSize(12);
+        transferStatus.setTextColor(0xFFB7C7D2);
+        transferStatus.setPadding(dp(4), dp(2), dp(4), dp(4));
+        transferCard.addView(transferStatus);
 
+        transferContent = new LinearLayout(this);
+        transferContent.setOrientation(LinearLayout.VERTICAL);
         LinearLayout transferButtons = new LinearLayout(this);
         transferButtons.setGravity(Gravity.CENTER);
         Button refreshTransfers = new Button(this);
-        refreshTransfers.setText("İstekleri yenile");
+        refreshTransfers.setText(R.string.transfer_refresh);
+        styleButton(refreshTransfers, 0xFF17362F, 0xFF70E7BD, 0xFF285B4D);
         refreshTransfers.setOnClickListener(view -> pollTransferActions(true));
         transferButtons.addView(refreshTransfers, new LinearLayout.LayoutParams(0, -2, 1));
         Button revokePairing = new Button(this);
-        revokePairing.setText("Eşleşmeyi kaldır");
+        revokePairing.setText(R.string.transfer_revoke);
+        styleButton(revokePairing, 0xFF392421, 0xFFFFA99B, 0xFF67413B);
         revokePairing.setOnClickListener(view -> revokeTransferPairing());
-        transferButtons.addView(revokePairing, new LinearLayout.LayoutParams(0, -2, 1));
-        root.addView(transferButtons);
+        LinearLayout.LayoutParams revokeParams = new LinearLayout.LayoutParams(0, -2, 1);
+        revokeParams.leftMargin = dp(8);
+        transferButtons.addView(revokePairing, revokeParams);
+        transferContent.addView(transferButtons);
         Button sendFileToPc = new Button(this);
-        sendFileToPc.setText("Telefondan dosya gönder");
+        sendFileToPc.setText(R.string.transfer_send_file);
+        styleButton(sendFileToPc, 0xFF1D3140, 0xFFB7D7E8, 0xFF304A5C);
         sendFileToPc.setOnClickListener(view -> startPhoneUploadPicker(null));
-        root.addView(sendFileToPc);
+        transferContent.addView(sendFileToPc);
 
         ScrollView transferActionScroll = new ScrollView(this);
         transferActionsContainer = new LinearLayout(this);
         transferActionsContainer.setOrientation(LinearLayout.VERTICAL);
         transferActionScroll.addView(transferActionsContainer);
-        root.addView(transferActionScroll, new LinearLayout.LayoutParams(-1, dp(112)));
+        transferContent.addView(transferActionScroll, new LinearLayout.LayoutParams(-1, dp(112)));
+        transferCard.addView(transferContent);
+        LinearLayout.LayoutParams transferParams = new LinearLayout.LayoutParams(-1, -2);
+        transferParams.topMargin = dp(10);
+        root.addView(transferCard, transferParams);
+        setTransferExpanded(false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+            getWindow().setStatusBarColor(Color.TRANSPARENT);
+            getWindow().setNavigationBarColor(Color.TRANSPARENT);
+            getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
+            root.setOnApplyWindowInsetsListener((view, insets) -> {
+                android.graphics.Insets safe = insets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                boolean keyboardVisible = insets.isVisible(WindowInsets.Type.ime());
+                android.graphics.Insets ime = insets.getInsets(WindowInsets.Type.ime());
+                int bottomInset = keyboardVisible ? Math.max(safe.bottom, ime.bottom) : safe.bottom;
+                root.setPadding(dp(16) + safe.left, dp(12) + safe.top,
+                        dp(16) + safe.right, dp(12) + bottomInset);
+                transferCard.setVisibility(keyboardVisible ? View.GONE : View.VISIBLE);
+                return insets;
+            });
+        }
         setContentView(root);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            root.requestApplyInsets();
+        }
     }
 
-    private void addDeviceActionButton(LinearLayout row, String label, DeviceCommandRouter.Action action) {
-        Button button = new Button(this);
-        button.setText(label);
-        button.setTextSize(11);
-        button.setPadding(dp(2), 0, dp(2), 0);
-        button.setOnClickListener(view -> launchDeviceAction(action, null));
-        row.addView(button, new LinearLayout.LayoutParams(0, -2, 1));
+    private void setTransferExpanded(boolean expanded) {
+        transferExpanded = expanded;
+        if (transferContent != null) {
+            transferContent.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        }
+        if (transferToggleButton != null) {
+            transferToggleButton.setText(expanded
+                    ? R.string.transfer_details_hide : R.string.transfer_details_show);
+            transferToggleButton.setContentDescription(getString(expanded
+                    ? R.string.transfer_details_hide_content_description
+                    : R.string.transfer_details_show_content_description));
+        }
+    }
+
+    private GradientDrawable roundedBackground(int color, int radius, int strokeColor) {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(color);
+        background.setCornerRadius(radius);
+        if (Color.alpha(strokeColor) != 0) {
+            background.setStroke(dp(1), strokeColor);
+        }
+        return background;
+    }
+
+    private GradientDrawable surfaceBackground() {
+        return roundedBackground(0xFF111A25, dp(22), 0xFF253543);
+    }
+
+    private void styleButton(Button button, int background, int foreground, int stroke) {
+        button.setAllCaps(false);
+        button.setTextSize(13);
+        button.setTextColor(foreground);
+        button.setTypeface(null, android.graphics.Typeface.BOLD);
+        button.setMinHeight(dp(48));
+        button.setMinimumHeight(dp(48));
+        button.setPadding(dp(14), dp(8), dp(14), dp(8));
+        GradientDrawable shape = roundedBackground(background, dp(16), stroke);
+        GradientDrawable rippleMask = roundedBackground(Color.WHITE, dp(16), 0x00FFFFFF);
+        int rippleColor = (foreground & 0x00FFFFFF) | 0x33000000;
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(rippleColor),
+                shape, rippleMask));
+        button.setElevation(0);
     }
 
     private void showSettings() {
@@ -544,25 +718,28 @@ public final class MainActivity extends Activity {
         for (TransferAction action : actions) {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
-            card.setPadding(dp(8), dp(5), dp(8), dp(5));
-            card.setBackgroundColor(0xFFEAF1EF);
+            card.setPadding(dp(10), dp(8), dp(10), dp(6));
+            card.setBackground(roundedBackground(0xFF17222E, dp(18), 0xFF2A3A49));
             TextView detail = new TextView(this);
             String direction = action.direction.equals("pc_to_phone")
                     ? "Bilgisayardan telefona" : "Telefondan bilgisayara";
-            detail.setText(direction + " · " + action.filename + "\n"
-                    + formatFileSize(action.size) + " · " + transferStateLabel(action.state));
-            detail.setTextColor(0xFF263330);
+            detail.setText(getString(R.string.transfer_action_details, direction, action.filename,
+                    formatFileSize(action.size), transferStateLabel(action.state)));
+            detail.setTextColor(0xFFB7C7D2);
+            detail.setTextSize(13);
             card.addView(detail);
             LinearLayout controls = new LinearLayout(this);
             controls.setGravity(Gravity.END);
             if (action.awaitsApproval() && action.direction.equals("pc_to_phone")) {
                 Button download = new Button(this);
-                download.setText("Dosyayı incele ve onayla");
+                download.setText(R.string.transfer_action_review);
+                styleButton(download, 0xFF087A69, Color.WHITE, 0x00FFFFFF);
                 download.setOnClickListener(view -> confirmDownloadAction(action));
                 controls.addView(download);
             } else if (action.direction.equals("pc_to_phone") && action.state.equals("ready")) {
                 Button download = new Button(this);
-                download.setText("Dosyayı indir");
+                download.setText(R.string.transfer_action_download);
+                styleButton(download, 0xFF17362F, 0xFF70E7BD, 0xFF285B4D);
                 download.setOnClickListener(view -> downloadReadyAction(action));
                 controls.addView(download);
             } else if (action.direction.equals("phone_to_pc")
@@ -570,12 +747,14 @@ public final class MainActivity extends Activity {
                     || action.state.equals("receiving"))) {
                 Button upload = new Button(this);
                 upload.setText(action.awaitsApproval() ? "Dosyayı seç ve onayla" : "Yüklemeyi sürdür");
+                styleButton(upload, 0xFF1D3140, 0xFFB7D7E8, 0xFF304A5C);
                 upload.setOnClickListener(view -> startPhoneUploadPicker(action));
                 controls.addView(upload);
             }
             if (!action.state.equals("completed") && !action.state.equals("cancelled")) {
                 Button cancel = new Button(this);
-                cancel.setText("İptal et");
+                cancel.setText(R.string.transfer_action_cancel);
+                styleButton(cancel, 0xFF392421, 0xFFFFA99B, 0xFF67413B);
                 cancel.setOnClickListener(view -> confirmCancelTransfer(action));
                 controls.addView(cancel);
             }
@@ -1091,6 +1270,13 @@ public final class MainActivity extends Activity {
         if (text.isEmpty()) {
             return;
         }
+        DeviceCommandRouter.Result localAction = DeviceCommandRouter.route(text);
+        if (localAction != null) {
+            messageInput.setText("");
+            addMessage("Sen", text);
+            launchDeviceAction(localAction.action, localAction.phoneNumber);
+            return;
+        }
         if (!ensureConfigured()) {
             resumeWakeWordServiceIfActive();
             return;
@@ -1190,8 +1376,17 @@ public final class MainActivity extends Activity {
         if (wakeStatus != null) {
             wakeStatus.setText(status == null ? "Dinleme durumu bilinmiyor." : status);
         }
+        boolean active = WakeWordService.isRunning();
+        if (wakeIndicator != null) {
+            wakeIndicator.setTextColor(active ? 0xFF43E0B2
+                    : status != null && (status.contains("başlat") || status.contains("algılandı"))
+                    ? 0xFFFFC266 : 0xFF607585);
+        }
         if (wakeWordButton != null) {
-            wakeWordButton.setText(WakeWordService.isRunning() ? "Hey Çip'i kapat" : "Hey Çip'i aç");
+            wakeWordButton.setText(active ? R.string.wake_button_stop : R.string.wake_button_start);
+            styleButton(wakeWordButton, active ? 0xFF38251F : 0xFF17362F,
+                    active ? 0xFFFFB18D : 0xFF70E7BD,
+                    active ? 0xFF654235 : 0xFF285B4D);
         }
     }
 
@@ -1216,6 +1411,13 @@ public final class MainActivity extends Activity {
 
     private void launchDeviceAction(DeviceCommandRouter.Action action, String phoneNumber) {
         pauseWakeWordService();
+        if (messageInput != null) {
+            InputMethodManager inputMethodManager =
+                    (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (inputMethodManager != null && messageInput.getWindowToken() != null) {
+                inputMethodManager.hideSoftInputFromWindow(messageInput.getWindowToken(), 0);
+            }
+        }
         try {
             switch (action) {
                 case OPEN_FILE:
@@ -1313,7 +1515,10 @@ public final class MainActivity extends Activity {
             recorder.prepare();
             recorder.start();
             recording = true;
-            recordButton.setText("Kaydı bitir");
+            recordButton.setText(R.string.record_stop_button);
+            recordButton.setContentDescription(getString(R.string.record_stop_content_description));
+            styleButton(recordButton, 0xFFB94336, Color.WHITE, 0x00FFFFFF);
+            animateTap(recordButton);
             Toast.makeText(this, "Dinliyorum...", Toast.LENGTH_SHORT).show();
         } catch (Exception error) {
             releaseRecorder();
@@ -1327,7 +1532,9 @@ public final class MainActivity extends Activity {
             return;
         }
         recording = false;
-        recordButton.setText("Ses kaydet");
+        recordButton.setText(R.string.record_button);
+        recordButton.setContentDescription(getString(R.string.record_content_description));
+        styleButton(recordButton, 0xFF38251F, 0xFFFFB18D, 0xFF654235);
         try {
             recorder.stop();
             releaseRecorder();
@@ -1472,16 +1679,54 @@ public final class MainActivity extends Activity {
     }
 
     private void addMessage(String sender, String text) {
-        TextView bubble = new TextView(this);
-        bubble.setText(sender + "\n" + text);
-        bubble.setTextSize(16);
-        bubble.setTextColor(sender.equals("Çip") ? 0xFF124E43 : 0xFF263330);
-        bubble.setPadding(dp(12), dp(9), dp(12), dp(9));
-        bubble.setBackgroundColor(sender.equals("Sen") ? 0xFFE5F2ED : 0xFFF0F4F2);
+        boolean isUser = sender.equals("Sen");
+        LinearLayout message = new LinearLayout(this);
+        message.setOrientation(LinearLayout.VERTICAL);
+        message.setPadding(dp(14), dp(10), dp(14), dp(10));
+        message.setBackground(roundedBackground(isUser ? 0xFF17362F : 0xFF17222E,
+                dp(18), isUser ? 0xFF285B4D : 0xFF2A3A49));
+        TextView author = new TextView(this);
+        author.setText(isUser ? R.string.message_author_user
+                : sender.equals("Çip") ? R.string.message_author_assistant : R.string.message_author_info);
+        author.setTextSize(10);
+        author.setLetterSpacing(0.08f);
+        author.setTypeface(null, android.graphics.Typeface.BOLD);
+        author.setTextColor(isUser ? 0xFF70E7BD
+                : sender.equals("Çip") ? 0xFF8AC9E8 : 0xFFFFB18D);
+        message.addView(author);
+        TextView body = new TextView(this);
+        body.setText(text);
+        body.setTextSize(15);
+        body.setTextColor(0xFFE1EAF0);
+        body.setLineSpacing(dp(2), 1.0f);
+        body.setPadding(0, dp(3), 0, 0);
+        message.addView(body);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
         params.bottomMargin = dp(8);
-        conversation.addView(bubble, params);
+        conversation.addView(message, params);
+        if (animationsEnabled()) {
+            message.setAlpha(0f);
+            message.setTranslationY(dp(8));
+            message.animate().alpha(1f).translationY(0).setDuration(180).start();
+        }
         conversationScroll.post(() -> conversationScroll.fullScroll(View.FOCUS_DOWN));
+    }
+
+    private void animateTap(View view) {
+        if (!animationsEnabled()) {
+            return;
+        }
+        view.animate().cancel();
+        view.setScaleX(1f);
+        view.setScaleY(1f);
+        view.animate().scaleX(0.96f).scaleY(0.96f).setDuration(100)
+                .withEndAction(() -> view.animate().scaleX(1f).scaleY(1f)
+                        .setDuration(140).start())
+                .start();
+    }
+
+    private boolean animationsEnabled() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.O || ValueAnimator.areAnimatorsEnabled();
     }
 
     private void setBusy(boolean value) {
@@ -1489,6 +1734,7 @@ public final class MainActivity extends Activity {
         sendButton.setEnabled(!value);
         recordButton.setEnabled(!value);
         sendButton.setText(value ? "Bekle..." : "Gönder");
+        sendButton.setAlpha(value ? 0.65f : 1f);
     }
 
     private boolean ensureConfigured() {
