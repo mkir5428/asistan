@@ -810,62 +810,12 @@ def transfer_actionlar():
             pairing, role, error = _transfer_auth(pairing_id, ("pc",))
             if error:
                 return error
-            if not _transfer_rate_limit(f"action-create:{pairing_id}", 30, 3600):
-                return _transfer_error("rate_limited", 429)
-            if pairing.device_token_digest is None:
-                return _transfer_error("not_paired", 409)
-            if set(body) != {"pairing_id", "direction", "filename", "size", "sha256"}:
-                return _transfer_error("invalid_request", 400)
-            direction = body.get("direction")
-            filename = body.get("filename")
-            size = body.get("size")
-            sha256 = body.get("sha256")
-            if (
-                direction not in ("pc_to_phone", "phone_to_pc")
-                or not isinstance(filename, str)
-                or not filename
-                or len(filename) > 255
-                or filename in (".", "..")
-                or filename.endswith((" ", "."))
-                or any(
-                    ord(char) < 32
-                    or ord(char) == 127
-                    or 0xD800 <= ord(char) <= 0xDFFF
-                    or char in '<>:"/\\|?*'
-                    for char in filename
-                )
-                or filename.split(".", 1)[0].upper() in {
-                    "CON", "PRN", "AUX", "NUL",
-                    *(f"COM{index}" for index in range(1, 10)),
-                    *(f"LPT{index}" for index in range(1, 10)),
-                }
-                or type(size) is not int
-                or not 1 <= size <= TRANSFER_MAX_BYTES
-                or not isinstance(sha256, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", sha256)
-            ):
-                return _transfer_error("invalid_request", 400)
-            active = sum(
-                a.state in ("awaiting_approval", "approved", "receiving", "ready", "sending")
-                for a in pairing.actions.values()
+            return _transfer_create_action(
+                pairing,
+                body,
+                ("pairing_id", "direction", "filename", "size", "sha256"),
+                body.get("direction"),
             )
-            if active >= TRANSFER_MAX_ACTIVE_ACTIONS_PER_PAIR:
-                return _transfer_error("too_many_active_actions", 409)
-            if len(pairing.actions) >= TRANSFER_MAX_ACTIONS_PER_PAIR:
-                return _transfer_error("action_capacity_exceeded", 409)
-            now = int(time.time())
-            action = _TransferAction(
-                action_id=secrets.token_urlsafe(18),
-                nonce=secrets.token_urlsafe(24),
-                direction=direction,
-                filename=filename,
-                size=size,
-                sha256=sha256,
-                created_at=now,
-                expires_at=now + TRANSFER_APPROVAL_TTL,
-            )
-            pairing.actions[action.action_id] = action
-            return _transfer_response(_transfer_action_json(pairing, action), 201)
 
     pairing_id = request.args.get("pairing_id", "")
     if not pairing_id:
@@ -880,6 +830,86 @@ def transfer_actionlar():
         return _transfer_response({
             "actions": [_transfer_action_json(pairing, action) for action in actions]
         })
+
+
+@app.route("/transfer/actions/phone", methods=["POST"])
+def transfer_telefon_eylemi_olustur():
+    _transfer_cleanup()
+    body, error = _transfer_json_body()
+    if error:
+        return error
+    pairing_id = body.get("pairing_id")
+    if not isinstance(pairing_id, str):
+        return _transfer_error("invalid_request", 400)
+    with _transfer_lock:
+        pairing, _role, error = _transfer_auth(pairing_id, ("device",))
+        if error:
+            return error
+        return _transfer_create_action(
+            pairing,
+            body,
+            ("pairing_id", "filename", "size", "sha256"),
+            "phone_to_pc",
+        )
+
+
+def _transfer_create_action(pairing, body, expected_fields, direction):
+    pairing_id = pairing.pairing_id
+    if not _transfer_rate_limit(f"action-create:{pairing_id}", 30, 3600):
+        return _transfer_error("rate_limited", 429)
+    if pairing.device_token_digest is None:
+        return _transfer_error("not_paired", 409)
+    if set(body) != set(expected_fields):
+        return _transfer_error("invalid_request", 400)
+    filename = body.get("filename")
+    size = body.get("size")
+    sha256 = body.get("sha256")
+    if (
+        direction not in ("pc_to_phone", "phone_to_pc")
+        or not isinstance(filename, str)
+        or not filename
+        or len(filename) > 255
+        or filename in (".", "..")
+        or filename.endswith((" ", "."))
+        or any(
+            ord(char) < 32
+            or ord(char) == 127
+            or 0xD800 <= ord(char) <= 0xDFFF
+            or char in '<>:"/\\|?*'
+            for char in filename
+        )
+        or filename.split(".", 1)[0].upper() in {
+            "CON", "PRN", "AUX", "NUL",
+            *(f"COM{index}" for index in range(1, 10)),
+            *(f"LPT{index}" for index in range(1, 10)),
+        }
+        or type(size) is not int
+        or not 1 <= size <= TRANSFER_MAX_BYTES
+        or not isinstance(sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", sha256)
+    ):
+        return _transfer_error("invalid_request", 400)
+    active = sum(
+        action.state in ("awaiting_approval", "approved", "receiving", "ready", "sending")
+        for action in pairing.actions.values()
+    )
+    if active >= TRANSFER_MAX_ACTIVE_ACTIONS_PER_PAIR:
+        return _transfer_error("too_many_active_actions", 409)
+    if len(pairing.actions) >= TRANSFER_MAX_ACTIONS_PER_PAIR:
+        return _transfer_error("action_capacity_exceeded", 409)
+    now = int(time.time())
+    action = _TransferAction(
+        action_id=secrets.token_urlsafe(18),
+        nonce=secrets.token_urlsafe(24),
+        direction=direction,
+        filename=filename,
+        size=size,
+        sha256=sha256,
+        created_at=now,
+        expires_at=now + TRANSFER_APPROVAL_TTL,
+    )
+    pairing.actions[action.action_id] = action
+    return _transfer_response(_transfer_action_json(pairing, action), 201)
 
 
 @app.route("/transfer/actions/<action_id>/approve", methods=["POST"])

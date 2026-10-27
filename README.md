@@ -111,9 +111,38 @@ gerekir.
 
 ### Tek eylem onayı ve aktarım
 
-Bilgisayar her dosya işlemi için yeni bir işlem oluşturur; sunucu keyfi yol, dosya
-okuma/yazma veya komut çalıştırma API'si sunmaz. İstemci yalnızca kullanıcının
-Windows'ta seçtiği/paylaştığı dosya veya klasör kapsamında işlem yapmalıdır.
+Her dosya işlemi, kullanıcının ilgili istemcide seçtiği/paylaştığı dosya için yeni
+bir action olarak oluşturulur; sunucu keyfi yol, dosya okuma/yazma veya komut
+çalıştırma API'si sunmaz. Windows istemcisi yalnızca kullanıcının seçtiği/paylaştığı
+dosya veya klasör kapsamında işlem yapmalıdır.
+
+PC'den telefona aktarımda PC aşağıdaki `/transfer/actions` endpoint'ini kullanır.
+Telefonun dosya seçicisinde kullanıcı tarafından seçilen dosya için Android,
+başka yöne kapsam veremeyen `POST /transfer/actions/phone` endpoint'ini çağırır:
+
+```http
+POST /transfer/actions/phone
+Authorization: Bearer <device_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "pairing_id":"...",
+  "filename":"telefon-secimi.pdf",
+  "size":12345,
+  "sha256":"64-kucuk-harfli-hex-karakter"
+}
+```
+
+Telefon endpoint'i `direction` alanını kabul etmez ve yalnızca `phone_to_pc`
+action'ı oluşturur. Android dosya seçicisinden gelen metadata ile boyut ve
+SHA-256'yı hesaplar; sunucu aynı filename, size ve SHA-256 doğrulamasını uygular.
+Bu endpoint de aynı `201` action yanıtını verir: `action_id`, sabit `direction`,
+`filename`, `size`, `sha256`, `nonce`, `expires_at`,
+`state:"awaiting_approval"` ve imzalanacak `challenge`. Her iki endpoint aynı
+pairing başına 30 action/saat, 20 action ömrü ve iki etkin action sınırlarını
+kullanır.
 
 ```http
 POST /transfer/actions
@@ -131,14 +160,14 @@ Content-Type: application/json
 }
 ```
 
-`direction` değeri `pc_to_phone` veya `phone_to_pc` olur. `size` 1–20 MiB
-aralığındadır; `filename` yalnızca dosya adı olabilir. Yanıt `action_id`, `nonce`,
-`expires_at`, `state:"awaiting_approval"` ve imzalanacak `challenge` döndürür.
-Android `GET /transfer/actions?pairing_id=...` ile işlemi alır, kullanıcıya yönü,
-dosya adını ve boyutu gösterir ve her işlem için ayrı BiometricPrompt ister.
-Onay anahtarı Android Keystore'da biyometriyle her kullanımda yetkilendirilen P-256
-anahtar olmalı; `BiometricPrompt.CryptoObject(Signature)` ile `challenge` UTF-8
-baytları ECDSA/SHA-256 kullanılarak imzalanmalı ve DER imza Base64 gönderilmelidir:
+`/transfer/actions` üzerindeki `direction` değeri `pc_to_phone` veya `phone_to_pc`
+olur. Her iki endpoint'te `size` 1–20 MiB aralığındadır ve `filename` yalnızca
+dosya adı olabilir. Android, kendi başlattığı `phone_to_pc` action'ı da dahil,
+her action için kullanıcıya yönü, dosya adını ve boyutu gösterip ayrı bir
+BiometricPrompt ister. Onay anahtarı Android Keystore'da biyometriyle her
+kullanımda yetkilendirilen P-256 anahtar olmalı; `BiometricPrompt.CryptoObject(Signature)`
+ile `challenge` UTF-8 baytları ECDSA/SHA-256 kullanılarak imzalanmalı ve DER
+imza Base64 gönderilmelidir:
 
 ```http
 POST /transfer/actions/{action_id}/approve
@@ -156,7 +185,8 @@ UTF-8 halidir:
 `size`, `sha256`, `expires_at`. Onay iki dakika içinde gelmelidir. API imzayı eşleşmiş
 Android açık anahtarıyla doğrular; onaydan sonra gönderim/alım için on dakika vardır.
 PC ve telefon işlem durumunu aynı `GET /transfer/actions?pairing_id=...` uç
-noktasından kendi token'larıyla sorgular.
+noktasından kendi token'larıyla sorgular. `phone_to_pc` için PC kendi token'ıyla
+action'ı görür ve yalnızca state `ready` olduğunda dosyayı indirebilir.
 
 Onaylanan işlemde yalnız belirlenen gönderen ham gövdeyi gönderir:
 
@@ -170,7 +200,8 @@ Content-Length: <imzalı-size>
 <dosya baytları>
 ```
 
-`pc_to_phone` için gönderen PC, `phone_to_pc` için Android'dir. Alıcı aynı
+`pc_to_phone` için gönderen PC, `phone_to_pc` için Android'dir. Her iki yönde de
+upload yalnızca cihazın imzası doğrulandıktan sonra kabul edilir. Alıcı aynı
 `/data` yoluna `GET` yapar; `pairing_id` query parametresi ve alıcının Bearer token'ı
 kullanılır. Gövde boyutu ve SHA-256 imzalı metadata ile eşleşince `ready` olur.
 Alıcı başarılı indirmeyi tamamladığında relay bellekteki baytları hemen siler ve

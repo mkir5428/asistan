@@ -61,6 +61,20 @@ class GuvenliAktarimTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json(), payload
 
+    def create_phone_action(self, payload=b"phone-selected file"):
+        response = self.request(
+            "POST",
+            "/transfer/actions/phone",
+            json={
+                "pairing_id": self.pairing["pairing_id"],
+                "filename": "phone-file.txt",
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            },
+            headers=self.auth(self.device_token),
+        )
+        return response, payload
+
     def approve(self, action):
         signature = self.private_key.sign(
             action["challenge"].encode("utf-8"),
@@ -159,6 +173,118 @@ class GuvenliAktarimTest(unittest.TestCase):
             self.device_token,
             self.pairing["pc_token"],
         )
+
+    def test_phone_creates_phone_to_pc_action_and_pc_downloads_only_after_approval(self):
+        created, payload = self.create_phone_action()
+        self.assertEqual(created.status_code, 201)
+        action = created.get_json()
+        self.assertEqual(action["direction"], "phone_to_pc")
+        self.assertEqual(action["state"], "awaiting_approval")
+        self.assertEqual(action["filename"], "phone-file.txt")
+        self.assertEqual(action["size"], len(payload))
+        self.assertEqual(action["sha256"], hashlib.sha256(payload).hexdigest())
+
+        listing = self.request(
+            "GET",
+            "/transfer/actions",
+            query_string={"pairing_id": self.pairing["pairing_id"]},
+            headers=self.auth(self.pairing["pc_token"]),
+        )
+        listed = next(
+            item
+            for item in listing.get_json()["actions"]
+            if item["action_id"] == action["action_id"]
+        )
+        self.assertEqual(listed["challenge"], action["challenge"])
+        early_download = self.request(
+            "GET",
+            f"/transfer/actions/{action['action_id']}/data",
+            query_string={"pairing_id": self.pairing["pairing_id"]},
+            headers=self.auth(self.pairing["pc_token"]),
+        )
+        self.assertEqual(early_download.status_code, 409)
+
+        self.assertEqual(self.approve(action).status_code, 204)
+        upload = self.request(
+            "PUT",
+            f"/transfer/actions/{action['action_id']}/data",
+            data=payload,
+            content_type="application/octet-stream",
+            headers={
+                **self.auth(self.device_token),
+                "X-Cip-Pairing-Id": self.pairing["pairing_id"],
+            },
+        )
+        self.assertEqual(upload.status_code, 201)
+        ready = self.request(
+            "GET",
+            "/transfer/actions",
+            query_string={"pairing_id": self.pairing["pairing_id"]},
+            headers=self.auth(self.pairing["pc_token"]),
+        )
+        listed = next(
+            item
+            for item in ready.get_json()["actions"]
+            if item["action_id"] == action["action_id"]
+        )
+        self.assertEqual(listed["state"], "ready")
+        download = self.request(
+            "GET",
+            f"/transfer/actions/{action['action_id']}/data",
+            query_string={"pairing_id": self.pairing["pairing_id"]},
+            headers=self.auth(self.pairing["pc_token"]),
+        )
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.data, payload)
+
+    def test_phone_action_route_is_device_only_and_for_phone_to_pc_scope(self):
+        body = {
+            "pairing_id": self.pairing["pairing_id"],
+            "filename": "phone.txt",
+            "size": 1,
+            "sha256": hashlib.sha256(b"x").hexdigest(),
+        }
+        pc_attempt = self.request(
+            "POST",
+            "/transfer/actions/phone",
+            json=body,
+            headers=self.auth(self.pairing["pc_token"]),
+        )
+        self.assertEqual(pc_attempt.status_code, 401)
+        direction_attempt = self.request(
+            "POST",
+            "/transfer/actions/phone",
+            json={**body, "direction": "pc_to_phone"},
+            headers=self.auth(self.device_token),
+        )
+        self.assertEqual(direction_attempt.status_code, 400)
+        other_route_attempt = self.request(
+            "POST",
+            "/transfer/actions",
+            json={**body, "direction": "phone_to_pc"},
+            headers=self.auth(self.device_token),
+        )
+        self.assertEqual(other_route_attempt.status_code, 401)
+
+    def test_phone_action_uses_shared_active_action_limit(self):
+        first, _payload = self.create_phone_action()
+        self.assertEqual(first.status_code, 201)
+        second = self.request(
+            "POST",
+            "/transfer/actions",
+            json={
+                "pairing_id": self.pairing["pairing_id"],
+                "direction": "pc_to_phone",
+                "filename": "pc.txt",
+                "size": 1,
+                "sha256": hashlib.sha256(b"x").hexdigest(),
+            },
+            headers=self.auth(self.pairing["pc_token"]),
+        )
+        self.assertEqual(second.status_code, 201)
+        third, _payload = self.create_phone_action()
+        self.assertEqual(third.status_code, 409)
+        self.assertEqual(third.get_json()["error"], "too_many_active_actions")
 
     def test_invalid_signature_and_wrong_sender_are_rejected(self):
         action, payload = self.create_action("pc_to_phone")
