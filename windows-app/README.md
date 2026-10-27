@@ -37,6 +37,51 @@ dosyanın bu klasörlerden birinde olmasını zorunlu kılar. Telefondan gelen d
 seçtiğiniz izinli klasöre kaydedilir; var olan dosyanın üzerine yazılmaz.
 Her dosya en fazla 20 MiB olabilir.
 
+## Çalışma alanı değişiklik önerileri API'si
+
+Backend'in `POST /workspace/plan` endpoint'i kullanıcının yazdığı talimatı ve
+yalnızca seçtiği mevcut dosyaların UTF-8 metinlerini alır. HTTPS ve mevcut
+`ASISTAN_API_KEY` Bearer kimlik doğrulaması zorunludur. Çalışma alanı kökü
+sunucuya gönderilmez; istemci gerçek dosya yolunun yapılandırılmış kökün içinde
+olduğunu ve dosyanın sembolik bağlantı/reparse noktası olmadığını doğrulamalıdır.
+
+```http
+POST /workspace/plan
+Authorization: Bearer <ASISTAN_API_KEY>
+Content-Type: application/json
+```
+
+```json
+{
+  "instruction": "Bu dosyada hata mesajını düzelt.",
+  "files": [
+    {"path": "src/main.py", "content": "mevcut UTF-8 dosya içeriği"}
+  ]
+}
+```
+
+Başarılı yanıtın biçimi:
+
+```json
+{
+  "summary": "Hata mesajı ve ilgili doğrulama güncellendi.",
+  "changes": [
+    {"relative_path": "src/main.py", "replacement_content": "önerilen tam dosya içeriği"}
+  ]
+}
+```
+
+İstek 512 KiB, talimat 4.000 karakter, yol 240 karakter, dosya sayısı 8,
+dosya başına girdi/çıktı 64 KiB, toplam içerik 256 KiB ve özet 2.000 karakterle
+sınırlıdır. Yalnızca göreli `/` yolları kabul edilir. Sunucu mutlak yolları,
+ebeveyn/geçersiz segmentleri, ters eğik çizgileri, yinelenen yolları, NUL ve
+Windows aygıt adlarını reddeder. Yanıt yalnızca istenen yolların her birini bir
+kez içerebilir; sunucu dosya oluşturamaz, silemez, yazamaz veya kod çalıştıramaz.
+İstemci unified diff'i göstermeli ve dosyaları yalnızca kullanıcının açık
+**Uygula** onayıyla yazmalıdır. Hata yanıtları `{ "error": "..." }` biçimindedir;
+özellikle `provider_error` ve `invalid_model_response` durumlarında hiçbir
+değişiklik uygulanmamalıdır.
+
 ## Aktarım akışı
 
 - Bilgisayardan telefona gönderme, dosyanın boyutunu ve SHA-256 özetini yerelde

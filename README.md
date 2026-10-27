@@ -18,6 +18,7 @@ alanlarıyla gönderilebilir.
 - `GET /hesap?ifade=12%20carpi%204` → güvenli hesap makinesi
 - `GET /seslendir?metin=Merhaba` → MP3 ses
 - `GET /temizle?session=...` → oturum hafızasını temizler
+- `POST /workspace/plan` → seçilmiş mevcut dosyalar için geçici değişiklik önerir
 
 ## Render > Environment'da olması gerekenler
 
@@ -42,6 +43,56 @@ Ses yüklemeleri en fazla 25 MB olabilir.
 
 API anahtarı için en az 32 rastgele bayt kullan; örneğin Python'da
 `python -c "import secrets; print(secrets.token_urlsafe(32))"` komutuyla üret.
+
+## Windows çalışma alanı değişiklik planı
+
+`POST /workspace/plan` mevcut API anahtarıyla kimlik doğrular ve HTTPS gerektirir.
+İstemci yalnızca kullanıcının açıkça seçtiği, yapılandırılmış çalışma alanındaki
+mevcut dosyaların göreli yollarını ve UTF-8 metin içeriklerini gönderir; çalışma
+alanı kökü sunucuya gönderilmez.
+
+```http
+POST /workspace/plan
+Authorization: Bearer <ASISTAN_API_KEY>
+Content-Type: application/json
+```
+
+```json
+{
+  "instruction": "Bu dosyada hata mesajını düzelt.",
+  "files": [
+    {"path": "src/main.py", "content": "mevcut dosya içeriği"}
+  ]
+}
+```
+
+Başarılı yanıt, yalnızca gönderilen yollar için eksiksiz içerik değişiklik
+önerileri ve kısa bir özettir:
+
+```json
+{
+  "summary": "Hata mesajı ve ilgili doğrulama güncellendi.",
+  "changes": [
+    {"relative_path": "src/main.py", "replacement_content": "önerilen tam dosya içeriği"}
+  ]
+}
+```
+
+İstek 512 KiB'ı, talimat 4.000 karakteri, yol 240 karakteri, dosya sayısı 8'i
+aşamaz. Her dosyanın girdi/çıktı metni en fazla 64 KiB, toplam içerik en fazla
+256 KiB'dır; özet 2.000 karakterle sınırlıdır. Yalnızca göreli `/` yolları
+kabul edilir; mutlak yollar, `.`/`..`/boş segmentler, ters eğik çizgi, NUL ve
+Windows aygıt adları reddedilir. Girdi ve model çıktısı sıkı biçimde doğrulanır;
+çıktı ekleme/silme/yeniden adlandırma yapamaz ve gönderilen her yolu tam bir kez
+geri döndürmelidir.
+
+Bu API yalnızca plan üretir: sunucu dosya sistemine erişmez, kaynakları veya
+sonuçları saklamaz, önerilen kodu çalıştırmaz. Windows istemcisi gerçek dosya
+yollarının seçilmiş çalışma alanı içinde olduğunu ve sembolik bağlantı/reparse
+noktası olmadığını ayrıca doğrulamalı, her dosya için unified diff göstermeli
+ve yazma işlemini yalnızca kullanıcının açık **Uygula** onayıyla yapmalıdır.
+`provider_error` veya `invalid_model_response` hataları planın üretilemediğini
+belirtir; istemci değişiklik uygulamamalıdır.
 
 ## Lokal çalıştırma
 
