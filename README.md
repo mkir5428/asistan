@@ -5,8 +5,9 @@ akıllı ampul komutlarını Tuya'ya iletir, gerisini Claude yanıtlar.
 
 ## Uç noktalar
 
-`/` dışındaki tüm uç noktalar API anahtarı ister. Metin parametreleri GET
-sorgusuyla veya POST form alanlarıyla gönderilebilir.
+`/` ve ayrı eşleştirme kimlik bilgileri kullanan `/transfer/` dışında tüm uç
+noktalar API anahtarı ister. Metin parametreleri GET sorgusuyla veya POST form
+alanlarıyla gönderilebilir.
 
 - `GET /` → sağlık/teşhis sayfası
 - `GET|POST /komut` → metin komutu (`text`, isteğe bağlı `gecmis`, `profil`, `session`)
@@ -22,7 +23,7 @@ sorgusuyla veya POST form alanlarıyla gönderilebilir.
 
 | Değişken | Açıklama |
 |---|---|
-| `ASISTAN_API_KEY` | `/` dışındaki uç noktalar için zorunlu API anahtarı |
+| `ASISTAN_API_KEY` | Mevcut `/transfer/` dışındaki API uç noktaları için zorunlu anahtar |
 | `ANTHROPIC_API_KEY` | Claude API anahtarı |
 | `GROQ_API_KEY` | Groq (whisper-large-v3) anahtarı |
 | `TUYA_CLIENT_ID` / `TUYA_CLIENT_SECRET` | Tuya IoT Cloud uygulaması |
@@ -31,7 +32,7 @@ sorgusuyla veya POST form alanlarıyla gönderilebilir.
 
 İsteğe bağlı: `CLAUDE_MODEL` (varsayılan `claude-sonnet-5-5`), `EDGE_TTS_SES`, `PORT`.
 
-`/` sağlık sayfası dışında tüm isteklerde şu başlığı gönder:
+Mevcut API isteklerinde (`/` sağlık sayfası hariç) şu başlığı gönder:
 
 ```
 Authorization: Bearer <ASISTAN_API_KEY>
@@ -90,11 +91,189 @@ Android Studio'da `android-app/` klasörünü açıp Gradle eşitlemesini tamaml
 Test APK'sı `android-app/app/build/outputs/apk/debug/app-debug.apk` konumuna çıkar.
 Build için Android SDK 36 ve JDK 17 veya üstü gerekir.
 
-Android birim testleri için `android-app/` klasöründe
-`.\gradlew.bat testDebugUnitTest` çalıştır.
+## Bilgisayar ↔ telefon dosya aktarımı API'si
+
+Transfer API'si `/transfer/` altında ayrı kimlik bilgileri kullanır; `ASISTAN_API_KEY`
+bu uç noktalara gönderilmez ve dosya aktarım yetkisi değildir. Tüm istekler aynı
+HTTPS sunucu adresine yapılmalıdır. Web CORS erişimi açılmaz. Dosya gövdesi TLS
+üzerinden şifrelenir; Render TLS'yi sonlandırdığı için relay dosya baytlarını aktarım
+sırasında bellekte açık biçimde görebilir. Dosya diske, uygulama loglarına veya hata
+yanıtlarına yazılmaz. Bu protokol uçtan uca dosya şifrelemesi sağlamaz.
+
+### Eşleştirme ve iptal
+
+Bilgisayar `POST /transfer/pairings` çağırır; API anahtarı gerekmez:
+
+```http
+POST /transfer/pairings
+```
+
+```json
+{
+  "pairing_id": "yanitta-verilen-kimlik",
+  "pairing_code": "10-haneli-kod",
+  "pc_token": "tekil-bilgisayar-tokeni",
+  "pairing_code_expires_in": 300,
+  "pairing_expires_in": 2592000
+}
+```
+
+10 haneli eşleştirme kodu beş dakika geçerlidir ve bir kez kullanılabilir. Bilgisayar kodu
+kullanıcıya yerel olarak gösterir; `pc_token` işletim sisteminin güvenli kimlik
+bilgisi kasasında tutulmalı, loglanmamalıdır. Android bir P-256 EC açık anahtarını
+PEM biçiminde göndererek `POST /transfer/pairings/claim` ile kodu talep eder:
+
+```json
+{"pairing_code":"1234567890","public_key_pem":"-----BEGIN PUBLIC KEY-----\\n..."}
+```
+
+Başarılı yanıt `pairing_id`, 30 gün geçerli `device_token` ve
+`pairing_expires_in` verir.
+Eşleştirme durumu bilgisayardan
+`GET /transfer/pairings/{pairing_id}` (`pc_token`) ile `waiting` veya `paired`
+olarak sorgulanır. Eşleştirme iki taraftan da
+`DELETE /transfer/pairings/{pairing_id}` ile iptal edilebilir; iptal bekleyen
+aktarımları ve bellekteki dosya baytlarını siler. Süre dolunca yeniden eşleştirme
+gerekir.
+
+### Tek eylem onayı ve aktarım
+
+Her dosya işlemi, kullanıcının ilgili istemcide seçtiği/paylaştığı dosya için yeni
+bir action olarak oluşturulur; sunucu keyfi yol, dosya okuma/yazma veya komut
+çalıştırma API'si sunmaz. Windows istemcisi yalnızca kullanıcının seçtiği/paylaştığı
+dosya veya klasör kapsamında işlem yapmalıdır.
+
+PC'den telefona aktarımda PC aşağıdaki `/transfer/actions` endpoint'ini kullanır.
+Telefonun dosya seçicisinde kullanıcı tarafından seçilen dosya için Android,
+başka yöne kapsam veremeyen `POST /transfer/actions/phone` endpoint'ini çağırır:
+
+```http
+POST /transfer/actions/phone
+Authorization: Bearer <device_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "pairing_id":"...",
+  "filename":"telefon-secimi.pdf",
+  "size":12345,
+  "sha256":"64-kucuk-harfli-hex-karakter"
+}
+```
+
+Telefon endpoint'i `direction` alanını kabul etmez ve yalnızca `phone_to_pc`
+action'ı oluşturur. Android dosya seçicisinden gelen metadata ile boyut ve
+SHA-256'yı hesaplar; sunucu aynı filename, size ve SHA-256 doğrulamasını uygular.
+Bu endpoint de aynı `201` action yanıtını verir: `action_id`, sabit `direction`,
+`filename`, `size`, `sha256`, `nonce`, `expires_at`,
+`state:"awaiting_approval"` ve imzalanacak `challenge`. Her iki endpoint aynı
+pairing başına 30 action/saat, 20 action ömrü ve iki etkin action sınırlarını
+kullanır.
+
+```http
+POST /transfer/actions
+Authorization: Bearer <pc_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "pairing_id":"...",
+  "direction":"pc_to_phone",
+  "filename":"rapor.pdf",
+  "size":12345,
+  "sha256":"64-kucuk-harfli-hex-karakter"
+}
+```
+
+`/transfer/actions` üzerindeki `direction` değeri `pc_to_phone` veya `phone_to_pc`
+olur. Her iki endpoint'te `size` 1–20 MiB aralığındadır ve `filename` yalnızca
+dosya adı olabilir. Android, kendi başlattığı `phone_to_pc` action'ı da dahil,
+her action için kullanıcıya yönü, dosya adını ve boyutu gösterip ayrı bir
+BiometricPrompt ister. Onay anahtarı Android Keystore'da biyometriyle her
+kullanımda yetkilendirilen P-256 anahtar olmalı; `BiometricPrompt.CryptoObject(Signature)`
+ile `challenge` UTF-8 baytları ECDSA/SHA-256 kullanılarak imzalanmalı ve DER
+imza Base64 gönderilmelidir:
+
+```http
+POST /transfer/actions/{action_id}/approve
+Authorization: Bearer <device_token>
+Content-Type: application/json
+```
+
+```json
+{"pairing_id":"...","signature":"Base64-DER-ECDSA-imzasi"}
+```
+
+Challenge'ın imzalı metni tam olarak şu satırların LF (`\\n`) ile birleştirilmiş
+UTF-8 halidir:
+`cip-transfer-v1`, `pairing_id`, `action_id`, `nonce`, `direction`, `filename`,
+`size`, `sha256`, `expires_at`. Onay iki dakika içinde gelmelidir. API imzayı eşleşmiş
+Android açık anahtarıyla doğrular; onaydan sonra gönderim/alım için on dakika vardır.
+PC ve telefon işlem durumunu aynı `GET /transfer/actions?pairing_id=...` uç
+noktasından kendi token'larıyla sorgular. `phone_to_pc` için PC kendi token'ıyla
+action'ı görür ve yalnızca state `ready` olduğunda dosyayı indirebilir.
+
+Onaylanan işlemde yalnız belirlenen gönderen ham gövdeyi gönderir:
+
+```http
+PUT /transfer/actions/{action_id}/data
+X-Cip-Pairing-Id: <pairing_id>
+Authorization: Bearer <gönderenin-tokeni>
+Content-Type: application/octet-stream
+Content-Length: <imzalı-size>
+
+<dosya baytları>
+```
+
+`pc_to_phone` için gönderen PC, `phone_to_pc` için Android'dir. Her iki yönde de
+upload yalnızca cihazın imzası doğrulandıktan sonra kabul edilir. Alıcı aynı
+`/data` yoluna `GET` yapar; `pairing_id` query parametresi ve alıcının Bearer token'ı
+kullanılır. Gövde boyutu ve SHA-256 imzalı metadata ile eşleşince `ready` olur.
+Alıcı başarılı indirmeyi tamamladığında relay bellekteki baytları hemen siler ve
+eylemi `completed` yapar. Taraflardan biri
+`POST /transfer/actions/{action_id}/cancel` gövdesinde `pairing_id` göndererek
+işlemi iptal edebilir.
+
+### Sınırlar ve hata kodları
+
+JSON gövdesi en fazla 8 KiB, tek dosya 20 MiB, süreçte tamponlanan toplam dosya
+verisi 100 MiB, eşzamanlı eylem eşleştirme başına iki adettir. Eşleştirme oluşturma,
+kod denemeleri, eylem oluşturma/onaylama ve veri uç noktaları süreç içi oran
+sınırlamasına tabidir. Hata yanıtı biçimi `{"error":"kod"}`. Kodlar ve durumları: `400 invalid_request`,
+`invalid_json`, `invalid_public_key`, `size_mismatch`, `content_mismatch`;
+`401 unauthorized`; `403 invalid_signature`, `wrong_transfer_party`;
+`404 not_found`; `409 already_paired`, `not_paired`, `too_many_active_actions`,
+`action_capacity_exceeded`, `action_not_awaiting_approval`,
+`action_not_approved_or_already_used`, `transfer_not_ready_or_already_used`;
+`410 pairing_code_invalid_or_expired`; `413 request_too_large`;
+`415 content_type_must_be_json`, `content_type_must_be_octet_stream`;
+`426 https_required`; `429 rate_limited`; `503 capacity_exceeded`,
+`relay_capacity_exceeded`; `unsupported_public_key` 400'dür. İstek IP sınırı
+`request.remote_addr` kullanır (X-Forwarded-For güvenilir proxy yapılandırması
+olmadığı için okunmaz); proxy tüm istemciler için aynı adresi gösterirse sınır
+ortak uygulanır.
+
+Sunucu biyometrinin gerçekten gösterildiğini tek başına doğrulayamaz; yalnızca
+eşleşme sırasında verilen açık anahtarın imzasını doğrular. Bu nedenle Android
+istemcisi biyometri zorunlu Android Keystore anahtarını doğru yapılandırmalı ve
+her dosya eyleminde BiometricPrompt göstermelidir. Sunucu tarafında Android Key
+Attestation doğrulaması bu API kapsamına dahil değildir.
+
+Aktarım/eşleştirme durumu ve rate limitleri yalnızca tek Python sürecinin RAM'inde
+tutulur; Flask uygulaması dosya içeriğini diske yazmaz ve süreçler arası paylaşım
+yoktur. Render ingress/proxy katmanının gövde tamponlama veya altyapı günlük
+politikaları bu uygulama tarafından denetlenmez; mutlak disk-saklamama garantisi
+deployment katmanında da doğrulanmalıdır. Render'da tek servis
+örneği ve tek Gunicorn worker kullanın; yatay ölçekleme veya birden fazla worker
+istekleri farklı RAM durumlarına yönlendirip eşleştirme/aktarımı bozabilir. Yeniden
+başlatma, çökme veya deploy bekleyen transferleri ve eşleşmeleri kaybettirir; istemci
+yeniden eşleşip aktarımı başlatmalıdır. 100 MiB sınırı tamponlanmış dosyaları kapsar;
+eşzamanlı isteklerin geçici RAM kullanımı buna eklenir.
 
 ## Render Start Command (önerilen)
 
 ```
-gunicorn voice_server:app --bind 0.0.0.0:$PORT --timeout 120
+gunicorn voice_server:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1
 ```

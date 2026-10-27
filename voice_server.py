@@ -11,26 +11,39 @@ Uç noktalar:
   GET  /hesap?ifade=...         -> güvenli hesap makinesi
   GET  /seslendir?metin=...     -> doğal Türkçe ses (edge-tts, mp3)
   GET  /temizle?session=...     -> sunucu tarafı oturum hafızasını sıfırla
+  POST /transfer/pairings       -> geçici bilgisayar/telefon eşleştirmesi
+  /transfer/actions             -> imzalı, tek eylem onaylı geçici dosya relay'i
 
 Tasarım ilkesi: AÇILIŞTA HİÇBİR ŞEY ÇÖKMEZ. Anahtarlar/bağlantılar tembel;
 eksik servis istek anında anlaşılır Türkçe mesaj döner.
 """
 
 import asyncio
+import base64
+import binascii
+import hashlib
+import hmac
 import io
 import ast
-import hmac
 import json
 import logging
 import math
 import os
 import re
+import secrets
 import sys
 import threading
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import requests
 from flask import Flask, Response, jsonify, request
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
 from tuya_connector import TuyaOpenAPI
 import anthropic
 
@@ -46,6 +59,49 @@ log = logging.getLogger("cip-sunucu")
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25_000_000
+
+# Transfer state is intentionally process-local and never written to disk.
+TRANSFER_PAIRING_CODE_TTL = 5 * 60
+TRANSFER_PAIRING_TTL = 30 * 24 * 60 * 60
+TRANSFER_APPROVAL_TTL = 2 * 60
+TRANSFER_ACTION_TTL = 10 * 60
+TRANSFER_MAX_BYTES = 20 * 1024 * 1024
+TRANSFER_MAX_BUFFERED_BYTES = 100 * 1024 * 1024
+TRANSFER_MAX_PAIRINGS = 500
+TRANSFER_MAX_ACTIONS_PER_PAIR = 20
+TRANSFER_MAX_ACTIVE_ACTIONS_PER_PAIR = 2
+TRANSFER_CODE_HMAC_KEY = secrets.token_bytes(32)
+_transfer_lock = threading.RLock()
+
+
+@dataclass
+class _TransferAction:
+    action_id: str
+    nonce: str
+    direction: str
+    filename: str
+    size: int
+    sha256: str
+    created_at: int
+    expires_at: int
+    state: str = "awaiting_approval"
+    data: bytearray = None
+
+
+@dataclass
+class _TransferPairing:
+    pairing_id: str
+    code_digest: bytes
+    code_expires_at: int
+    expires_at: int
+    pc_token_digest: bytes
+    device_token_digest: bytes = None
+    public_key: object = None
+    actions: dict = field(default_factory=dict)
+
+
+_transfer_pairings = {}
+_transfer_rate_buckets = {}
 
 # ==================== ENV (tembel) ====================
 
@@ -463,6 +519,8 @@ def duz_metin(mesaj: str, durum: int = 200, basliklar: dict = None):
 
 @app.before_request
 def kimlik_dogrula():
+    if request.path.startswith("/transfer/"):
+        return None
     if request.path == "/" and request.method == "GET":
         return None
 
@@ -482,6 +540,545 @@ def kimlik_dogrula():
             {"WWW-Authenticate": "Bearer"},
         )
     return None
+
+
+def _transfer_response(payload, status=200):
+    response = jsonify(payload) if payload is not None else Response(status=status)
+    response.status_code = status
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def _transfer_error(code, status):
+    return _transfer_response({"error": code}, status)
+
+
+def _transfer_tls_ok():
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
+    return request.is_secure or forwarded_proto == "https"
+
+
+def _transfer_json_body():
+    if request.mimetype != "application/json":
+        return None, _transfer_error("content_type_must_be_json", 415)
+    if request.content_length is not None and request.content_length > 8192:
+        return None, _transfer_error("request_too_large", 413)
+    raw = request.get_data(cache=False)
+    if len(raw) > 8192:
+        return None, _transfer_error("request_too_large", 413)
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None, _transfer_error("invalid_json", 400)
+    if not isinstance(body, dict):
+        return None, _transfer_error("invalid_request", 400)
+    return body, None
+
+
+def _transfer_code_digest(code):
+    return hmac.new(TRANSFER_CODE_HMAC_KEY, code.encode("ascii"), hashlib.sha256).digest()
+
+
+def _transfer_wipe_action(action):
+    if action.data is not None:
+        action.data[:] = b"\x00" * len(action.data)
+        action.data = None
+
+
+def _transfer_cleanup(now=None):
+    now = int(time.time()) if now is None else int(now)
+    with _transfer_lock:
+        for pairing_id, pairing in list(_transfer_pairings.items()):
+            if pairing.expires_at <= now or (
+                pairing.device_token_digest is None and pairing.code_expires_at <= now
+            ):
+                for action in pairing.actions.values():
+                    _transfer_wipe_action(action)
+                del _transfer_pairings[pairing_id]
+                continue
+            for action_id, action in list(pairing.actions.items()):
+                if action.expires_at <= now:
+                    _transfer_wipe_action(action)
+                    del pairing.actions[action_id]
+
+
+def _transfer_rate_limit(key, limit, window):
+    now = time.monotonic()
+    with _transfer_lock:
+        times = [stamp for stamp in _transfer_rate_buckets.get(key, []) if now - stamp < window]
+        if len(times) >= limit:
+            _transfer_rate_buckets[key] = times
+            return False
+        if len(_transfer_rate_buckets) >= 4096 and key not in _transfer_rate_buckets:
+            for old_key, old_times in list(_transfer_rate_buckets.items()):
+                if not old_times or now - old_times[-1] > 3600:
+                    del _transfer_rate_buckets[old_key]
+            if len(_transfer_rate_buckets) >= 4096:
+                return False
+        times.append(now)
+        _transfer_rate_buckets[key] = times
+        return True
+
+
+def _transfer_auth(pairing_id, allowed_roles):
+    pairing = _transfer_pairings.get(pairing_id)
+    if pairing is None:
+        return None, None, _transfer_error("not_found", 404)
+    authorization = request.headers.get("Authorization", "")
+    scheme, separator, token = authorization.partition(" ")
+    if not separator or scheme.lower() != "bearer" or not token or len(token) > 128:
+        return None, None, _transfer_error("unauthorized", 401)
+    digest = hashlib.sha256(token.strip().encode("utf-8")).digest()
+    if "pc" in allowed_roles and hmac.compare_digest(digest, pairing.pc_token_digest):
+        return pairing, "pc", None
+    if (
+        pairing.device_token_digest is not None
+        and "device" in allowed_roles
+        and hmac.compare_digest(digest, pairing.device_token_digest)
+    ):
+        return pairing, "device", None
+    return None, None, _transfer_error("unauthorized", 401)
+
+
+def _transfer_action_json(pairing, action):
+    return {
+        "action_id": action.action_id,
+        "direction": action.direction,
+        "filename": action.filename,
+        "size": action.size,
+        "sha256": action.sha256,
+        "nonce": action.nonce,
+        "expires_at": action.expires_at,
+        "state": action.state,
+        "challenge": (
+            _transfer_signature_message(pairing, action).decode("utf-8")
+            if action.state == "awaiting_approval"
+            else None
+        ),
+    }
+
+
+def _transfer_signature_message(pairing, action):
+    fields = (
+        "cip-transfer-v1",
+        pairing.pairing_id,
+        action.action_id,
+        action.nonce,
+        action.direction,
+        action.filename,
+        str(action.size),
+        action.sha256,
+        str(action.expires_at),
+    )
+    return "\n".join(fields).encode("utf-8")
+
+
+@app.before_request
+def transfer_tls_kontrolu():
+    if request.path.startswith("/transfer/") and not _transfer_tls_ok():
+        return _transfer_error("https_required", 426)
+    return None
+
+
+@app.errorhandler(413)
+def transfer_istek_boyutu_asildi(_error):
+    if request.path.startswith("/transfer/"):
+        return _transfer_error("request_too_large", 413)
+    return duz_metin("İstek boyutu çok büyük.", 413)
+
+
+@app.route("/transfer/pairings", methods=["POST"])
+def transfer_pairing_olustur():
+    _transfer_cleanup()
+    ip = request.remote_addr or "unknown"
+    if not _transfer_rate_limit("pair-create:global", 30, 60) or not _transfer_rate_limit(
+        f"pair-create:{ip}", 5, 60
+    ):
+        return _transfer_error("rate_limited", 429)
+    with _transfer_lock:
+        if len(_transfer_pairings) >= TRANSFER_MAX_PAIRINGS:
+            return _transfer_error("capacity_exceeded", 503)
+        now = int(time.time())
+        while True:
+            code = f"{secrets.randbelow(10_000_000_000):010d}"
+            code_digest = _transfer_code_digest(code)
+            if all(not hmac.compare_digest(p.code_digest, code_digest) for p in _transfer_pairings.values()):
+                break
+        pairing_id = secrets.token_urlsafe(18)
+        pc_token = secrets.token_urlsafe(32)
+        pairing = _TransferPairing(
+            pairing_id=pairing_id,
+            code_digest=code_digest,
+            code_expires_at=now + TRANSFER_PAIRING_CODE_TTL,
+            expires_at=now + TRANSFER_PAIRING_TTL,
+            pc_token_digest=hashlib.sha256(pc_token.encode("ascii")).digest(),
+        )
+        _transfer_pairings[pairing_id] = pairing
+    return _transfer_response({
+        "pairing_id": pairing_id,
+        "pairing_code": code,
+        "pc_token": pc_token,
+        "pairing_code_expires_in": TRANSFER_PAIRING_CODE_TTL,
+        "pairing_expires_in": TRANSFER_PAIRING_TTL,
+    }, 201)
+
+
+@app.route("/transfer/pairings/claim", methods=["POST"])
+def transfer_pairing_eslestir():
+    _transfer_cleanup()
+    ip = request.remote_addr or "unknown"
+    if not _transfer_rate_limit("pair-claim:global", 60, 60) or not _transfer_rate_limit(
+        f"pair-claim:{ip}", 10, 60
+    ):
+        return _transfer_error("rate_limited", 429)
+    body, error = _transfer_json_body()
+    if error:
+        return error
+    code = body.get("pairing_code")
+    public_key_pem = body.get("public_key_pem")
+    if (
+        not isinstance(code, str)
+        or not re.fullmatch(r"[0-9]{10}", code)
+        or not isinstance(public_key_pem, str)
+        or len(public_key_pem) > 4096
+    ):
+        return _transfer_error("invalid_request", 400)
+    try:
+        public_key = serialization.load_pem_public_key(public_key_pem.encode("ascii"))
+    except (ValueError, TypeError, UnicodeEncodeError):
+        return _transfer_error("invalid_public_key", 400)
+    if (
+        not isinstance(public_key, EllipticCurvePublicKey)
+        or not isinstance(public_key.curve, ec.SECP256R1)
+    ):
+        return _transfer_error("unsupported_public_key", 400)
+
+    digest = _transfer_code_digest(code)
+    with _transfer_lock:
+        pairing = next(
+            (p for p in _transfer_pairings.values() if hmac.compare_digest(p.code_digest, digest)),
+            None,
+        )
+        if pairing is None or pairing.code_expires_at <= int(time.time()):
+            return _transfer_error("pairing_code_invalid_or_expired", 410)
+        if pairing.device_token_digest is not None:
+            return _transfer_error("already_paired", 409)
+        device_token = secrets.token_urlsafe(32)
+        pairing.device_token_digest = hashlib.sha256(device_token.encode("ascii")).digest()
+        pairing.public_key = public_key
+    return _transfer_response({
+        "pairing_id": pairing.pairing_id,
+        "device_token": device_token,
+        "pairing_expires_in": max(0, pairing.expires_at - int(time.time())),
+    }, 201)
+
+
+@app.route("/transfer/pairings/<pairing_id>", methods=["GET", "DELETE"])
+def transfer_pairing_durum(pairing_id):
+    _transfer_cleanup()
+    with _transfer_lock:
+        pairing, role, error = _transfer_auth(pairing_id, ("pc", "device") if request.method == "DELETE" else ("pc",))
+        if error:
+            return error
+        if request.method == "DELETE":
+            for action in pairing.actions.values():
+                _transfer_wipe_action(action)
+            del _transfer_pairings[pairing_id]
+            return _transfer_response(None, 204)
+        if not _transfer_rate_limit(f"pair-status:{pairing_id}", 60, 60):
+            return _transfer_error("rate_limited", 429)
+        return _transfer_response({
+            "pairing_id": pairing_id,
+            "state": "paired" if pairing.device_token_digest is not None else "waiting",
+            "expires_in": max(0, pairing.expires_at - int(time.time())),
+        })
+
+
+@app.route("/transfer/actions", methods=["GET", "POST"])
+def transfer_actionlar():
+    _transfer_cleanup()
+    if request.method == "POST":
+        body, error = _transfer_json_body()
+        if error:
+            return error
+        pairing_id = body.get("pairing_id")
+        if not isinstance(pairing_id, str):
+            return _transfer_error("invalid_request", 400)
+        with _transfer_lock:
+            pairing, role, error = _transfer_auth(pairing_id, ("pc",))
+            if error:
+                return error
+            return _transfer_create_action(
+                pairing,
+                body,
+                ("pairing_id", "direction", "filename", "size", "sha256"),
+                body.get("direction"),
+            )
+
+    pairing_id = request.args.get("pairing_id", "")
+    if not pairing_id:
+        return _transfer_error("invalid_request", 400)
+    with _transfer_lock:
+        pairing, _role, error = _transfer_auth(pairing_id, ("pc", "device"))
+        if error:
+            return error
+        if not _transfer_rate_limit(f"action-list:{pairing_id}", 120, 60):
+            return _transfer_error("rate_limited", 429)
+        actions = sorted(pairing.actions.values(), key=lambda action: action.created_at)
+        return _transfer_response({
+            "actions": [_transfer_action_json(pairing, action) for action in actions]
+        })
+
+
+@app.route("/transfer/actions/phone", methods=["POST"])
+def transfer_telefon_eylemi_olustur():
+    _transfer_cleanup()
+    body, error = _transfer_json_body()
+    if error:
+        return error
+    pairing_id = body.get("pairing_id")
+    if not isinstance(pairing_id, str):
+        return _transfer_error("invalid_request", 400)
+    with _transfer_lock:
+        pairing, _role, error = _transfer_auth(pairing_id, ("device",))
+        if error:
+            return error
+        return _transfer_create_action(
+            pairing,
+            body,
+            ("pairing_id", "filename", "size", "sha256"),
+            "phone_to_pc",
+        )
+
+
+def _transfer_create_action(pairing, body, expected_fields, direction):
+    pairing_id = pairing.pairing_id
+    if not _transfer_rate_limit(f"action-create:{pairing_id}", 30, 3600):
+        return _transfer_error("rate_limited", 429)
+    if pairing.device_token_digest is None:
+        return _transfer_error("not_paired", 409)
+    if set(body) != set(expected_fields):
+        return _transfer_error("invalid_request", 400)
+    filename = body.get("filename")
+    size = body.get("size")
+    sha256 = body.get("sha256")
+    if (
+        direction not in ("pc_to_phone", "phone_to_pc")
+        or not isinstance(filename, str)
+        or not filename
+        or len(filename) > 255
+        or filename in (".", "..")
+        or filename.endswith((" ", "."))
+        or any(
+            ord(char) < 32
+            or ord(char) == 127
+            or 0xD800 <= ord(char) <= 0xDFFF
+            or char in '<>:"/\\|?*'
+            for char in filename
+        )
+        or filename.split(".", 1)[0].upper() in {
+            "CON", "PRN", "AUX", "NUL",
+            *(f"COM{index}" for index in range(1, 10)),
+            *(f"LPT{index}" for index in range(1, 10)),
+        }
+        or type(size) is not int
+        or not 1 <= size <= TRANSFER_MAX_BYTES
+        or not isinstance(sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", sha256)
+    ):
+        return _transfer_error("invalid_request", 400)
+    active = sum(
+        action.state in ("awaiting_approval", "approved", "receiving", "ready", "sending")
+        for action in pairing.actions.values()
+    )
+    if active >= TRANSFER_MAX_ACTIVE_ACTIONS_PER_PAIR:
+        return _transfer_error("too_many_active_actions", 409)
+    if len(pairing.actions) >= TRANSFER_MAX_ACTIONS_PER_PAIR:
+        return _transfer_error("action_capacity_exceeded", 409)
+    now = int(time.time())
+    action = _TransferAction(
+        action_id=secrets.token_urlsafe(18),
+        nonce=secrets.token_urlsafe(24),
+        direction=direction,
+        filename=filename,
+        size=size,
+        sha256=sha256,
+        created_at=now,
+        expires_at=now + TRANSFER_APPROVAL_TTL,
+    )
+    pairing.actions[action.action_id] = action
+    return _transfer_response(_transfer_action_json(pairing, action), 201)
+
+
+@app.route("/transfer/actions/<action_id>/approve", methods=["POST"])
+def transfer_action_onayla(action_id):
+    _transfer_cleanup()
+    body, error = _transfer_json_body()
+    if error:
+        return error
+    pairing_id = body.get("pairing_id")
+    signature_b64 = body.get("signature")
+    if (
+        not isinstance(pairing_id, str)
+        or not isinstance(signature_b64, str)
+        or len(signature_b64) > 1024
+    ):
+        return _transfer_error("invalid_request", 400)
+    with _transfer_lock:
+        pairing, role, error = _transfer_auth(pairing_id, ("device",))
+        if error:
+            return error
+        if not _transfer_rate_limit(f"approve:{pairing_id}", 30, 3600):
+            return _transfer_error("rate_limited", 429)
+        action = pairing.actions.get(action_id)
+        if action is None:
+            return _transfer_error("not_found", 404)
+        if action.state != "awaiting_approval":
+            return _transfer_error("action_not_awaiting_approval", 409)
+        try:
+            signature = base64.b64decode(signature_b64, validate=True)
+            pairing.public_key.verify(
+                signature,
+                _transfer_signature_message(pairing, action),
+                ec.ECDSA(hashes.SHA256()),
+            )
+        except (InvalidSignature, ValueError, binascii.Error):
+            return _transfer_error("invalid_signature", 403)
+        action.state = "approved"
+        action.expires_at = int(time.time()) + TRANSFER_ACTION_TTL
+    return _transfer_response(None, 204)
+
+
+@app.route("/transfer/actions/<action_id>/cancel", methods=["POST"])
+def transfer_action_iptal(action_id):
+    _transfer_cleanup()
+    body, error = _transfer_json_body()
+    if error:
+        return error
+    pairing_id = body.get("pairing_id")
+    if not isinstance(pairing_id, str):
+        return _transfer_error("invalid_request", 400)
+    with _transfer_lock:
+        pairing, _role, error = _transfer_auth(pairing_id, ("pc", "device"))
+        if error:
+            return error
+        if not _transfer_rate_limit(f"cancel:{pairing_id}", 30, 60):
+            return _transfer_error("rate_limited", 429)
+        action = pairing.actions.get(action_id)
+        if action is None:
+            return _transfer_error("not_found", 404)
+        _transfer_wipe_action(action)
+        action.state = "cancelled"
+        action.expires_at = int(time.time()) + TRANSFER_ACTION_TTL
+    return _transfer_response(None, 204)
+
+
+@app.route("/transfer/actions/<action_id>/data", methods=["PUT", "GET"])
+def transfer_action_verisi(action_id):
+    _transfer_cleanup()
+    pairing_id = request.args.get("pairing_id", "")
+    if request.method == "PUT":
+        pairing_id = request.headers.get("X-Cip-Pairing-Id", pairing_id)
+    if not pairing_id:
+        return _transfer_error("invalid_request", 400)
+    with _transfer_lock:
+        pairing, role, error = _transfer_auth(pairing_id, ("pc", "device"))
+        if error:
+            return error
+        action = pairing.actions.get(action_id)
+        if action is None:
+            return _transfer_error("not_found", 404)
+        sender_role = "pc" if action.direction == "pc_to_phone" else "device"
+        receiver_role = "device" if sender_role == "pc" else "pc"
+        if request.method == "PUT":
+            if role != sender_role:
+                return _transfer_error("wrong_transfer_party", 403)
+            if action.state != "approved":
+                return _transfer_error("action_not_approved_or_already_used", 409)
+            if request.mimetype != "application/octet-stream":
+                return _transfer_error("content_type_must_be_octet_stream", 415)
+            if request.content_length is not None and request.content_length > TRANSFER_MAX_BYTES:
+                _transfer_wipe_action(action)
+                action.state = "cancelled"
+                action.expires_at = int(time.time()) + TRANSFER_ACTION_TTL
+                return _transfer_error("request_too_large", 413)
+            if request.content_length != action.size:
+                _transfer_wipe_action(action)
+                action.state = "cancelled"
+                action.expires_at = int(time.time()) + TRANSFER_ACTION_TTL
+                return _transfer_error("size_mismatch", 400)
+            if not _transfer_rate_limit(f"upload:{pairing_id}", 10, 60):
+                return _transfer_error("rate_limited", 429)
+            action.state = "receiving"
+        else:
+            if role != receiver_role:
+                return _transfer_error("wrong_transfer_party", 403)
+            if action.state != "ready" or action.data is None:
+                return _transfer_error("transfer_not_ready_or_already_used", 409)
+            if not _transfer_rate_limit(f"download:{pairing_id}", 10, 60):
+                return _transfer_error("rate_limited", 429)
+            buffer = action.data
+            payload = bytes(buffer)
+            filename = action.filename
+            action.state = "sending"
+
+    if request.method == "PUT":
+        payload = request.get_data(cache=False)
+        with _transfer_lock:
+            pairing = _transfer_pairings.get(pairing_id)
+            action = pairing.actions.get(action_id) if pairing is not None else None
+            if action is None or action.state != "receiving":
+                return _transfer_error("action_not_approved_or_already_used", 409)
+            if len(payload) != action.size or not hmac.compare_digest(
+                hashlib.sha256(payload).hexdigest(), action.sha256
+            ):
+                action.state = "cancelled"
+                action.expires_at = int(time.time()) + TRANSFER_ACTION_TTL
+                return _transfer_error("content_mismatch", 400)
+            buffered = sum(
+                len(existing.data)
+                for current_pairing in _transfer_pairings.values()
+                for existing in current_pairing.actions.values()
+                if existing.data is not None
+            )
+            if buffered + len(payload) > TRANSFER_MAX_BUFFERED_BYTES:
+                action.state = "approved"
+                return _transfer_error("relay_capacity_exceeded", 503)
+            action.data = bytearray(payload)
+            action.state = "ready"
+            return _transfer_response({"action_id": action_id, "state": "ready"}, 201)
+
+    def aktarim_akisi():
+        tamamlandi = False
+        try:
+            yield payload
+            tamamlandi = True
+        finally:
+            with _transfer_lock:
+                current_pairing = _transfer_pairings.get(pairing_id)
+                current_action = (
+                    current_pairing.actions.get(action_id)
+                    if current_pairing is not None
+                    else None
+                )
+                if current_action is not None and current_action.data is buffer:
+                    if tamamlandi:
+                        _transfer_wipe_action(current_action)
+                        current_action.state = "completed"
+                        current_action.expires_at = int(time.time()) + TRANSFER_ACTION_TTL
+                    elif current_action.state == "sending":
+                        current_action.state = "ready"
+
+    response = Response(aktarim_akisi(), mimetype="application/octet-stream")
+    response.headers["Content-Disposition"] = (
+        "attachment; filename*=UTF-8''" + quote(filename, safe="")
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 def oturum_id() -> str:
