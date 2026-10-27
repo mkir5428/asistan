@@ -160,6 +160,14 @@ internal sealed class MainForm : Form
                 Clipboard.SetText(pairingCode.Text);
         };
         transferButtons.Controls.Add(copyCode);
+        var workspace = new Button { Text = "Çalışma alanı ve yerel sunucu", AutoSize = true, Height = 38 };
+        workspace.Click += (_, _) =>
+        {
+            using var form = new WorkspaceForm(state, SaveState);
+            form.ShowDialog(this);
+            RefreshFolders();
+        };
+        transferButtons.Controls.Add(workspace);
         var transferNote = new Label
         {
             AutoSize = true,

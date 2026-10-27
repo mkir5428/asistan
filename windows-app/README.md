@@ -37,6 +37,51 @@ dosyanın bu klasörlerden birinde olmasını zorunlu kılar. Telefondan gelen d
 seçtiğiniz izinli klasöre kaydedilir; var olan dosyanın üzerine yazılmaz.
 Her dosya en fazla 20 MiB olabilir.
 
+## Çalışma alanı değişiklik önerileri API'si
+
+Backend'in `POST /workspace/plan` endpoint'i kullanıcının yazdığı talimatı ve
+yalnızca seçtiği mevcut dosyaların UTF-8 metinlerini alır. HTTPS ve mevcut
+`ASISTAN_API_KEY` Bearer kimlik doğrulaması zorunludur. Çalışma alanı kökü
+sunucuya gönderilmez; istemci gerçek dosya yolunun yapılandırılmış kökün içinde
+olduğunu ve dosyanın sembolik bağlantı/reparse noktası olmadığını doğrulamalıdır.
+
+```http
+POST /workspace/plan
+Authorization: Bearer <ASISTAN_API_KEY>
+Content-Type: application/json
+```
+
+```json
+{
+  "instruction": "Bu dosyada hata mesajını düzelt.",
+  "files": [
+    {"path": "src/main.py", "content": "mevcut UTF-8 dosya içeriği"}
+  ]
+}
+```
+
+Başarılı yanıtın biçimi:
+
+```json
+{
+  "summary": "Hata mesajı ve ilgili doğrulama güncellendi.",
+  "changes": [
+    {"relative_path": "src/main.py", "replacement_content": "önerilen tam dosya içeriği"}
+  ]
+}
+```
+
+İstek 512 KiB, talimat 4.000 karakter, yol 240 karakter, dosya sayısı 8,
+dosya başına girdi/çıktı 64 KiB, toplam içerik 256 KiB ve özet 2.000 karakterle
+sınırlıdır. Yalnızca göreli `/` yolları kabul edilir. Sunucu mutlak yolları,
+ebeveyn/geçersiz segmentleri, ters eğik çizgileri, yinelenen yolları, NUL ve
+Windows aygıt adlarını reddeder. Yanıt yalnızca istenen yolların her birini bir
+kez içerebilir; sunucu dosya oluşturamaz, silemez, yazamaz veya kod çalıştıramaz.
+İstemci unified diff'i göstermeli ve dosyaları yalnızca kullanıcının açık
+**Apply** metin onayıyla yazmalıdır. Hata yanıtları `{ "error": "..." }` biçimindedir;
+özellikle `provider_error` ve `invalid_model_response` durumlarında hiçbir
+değişiklik uygulanmamalıdır.
+
 ## Aktarım akışı
 
 - Bilgisayardan telefona gönderme, dosyanın boyutunu ve SHA-256 özetini yerelde
@@ -70,6 +115,40 @@ Restart/deploy eşleşmeleri ve bekleyen transferleri siler; uygulama yeniden
 eşleştirilmelidir. Bilgisayar uygulaması açık ve ağa bağlı değilken aktarım
 yapılamaz. Sunucudaki rate limit ve kapasite hataları kullanıcıya gösterilir.
 
+## v4.6 çalışma alanı ve yerel sunucu
+
+**Çalışma alanı ve yerel sunucu** penceresinde bir proje klasörünü açıkça seçin.
+Planlama isteği yalnızca ayrıca seçtiğiniz 1-8 mevcut dosyanın UTF-8 içeriğini
+ve yazdığınız talimatı HTTPS `POST /workspace/plan` uç noktasına gönderir.
+Talimat 4.000 karakter; yol 240 karakter; her dosya 64 KiB, toplam içerik
+256 KiB ve JSON isteği 512 KiB ile sınırlıdır. Yanıtta dosya yolları tam olarak
+seçilen dosyalarla eşleşmelidir.
+`ASISTAN_API_KEY`, Windows hesabına bağlı DPAPI ile korunan ayarlarda tutulur ve
+yalnızca bu planlama uç noktasına gönderilir; transfer API'sinde kullanılmaz.
+
+Sunucudan dönen dosya yolları ve içerikler güvenilir kabul edilmez: istemci
+yalnızca gönderilen dosyalar için eksiksiz yanıtı kabul eder, yolları tekrar
+doğrular ve her dosyanın farkını gösterir. Dosyalar, **Apply** metnini yazarak
+onay vermeden yazılmaz. Uygulama öncesi dosya içeriğinin
+plan oluşturulduğundakiyle aynı olduğu doğrulanır; her dosya aynı klasördeki
+geçici dosyaya yazılıp atomik olarak değiştirilir. Planlanan kod veya komut
+çalıştırılmaz. Dosya seçim sınırları nedeniyle büyük/ikili dosyalar
+planlamaya gönderilemez.
+
+**Derleme/Test** sekmesinde kullanıcı tarafından kaydedilmiş `build` veya `test`
+iş akışlarından biri açıkça seçilip başlatılabilir. Her iş akışı sabit bir
+`.exe`, çalışma alanı içindeki çalışma klasörü ve sabit argümanlardan oluşur;
+komut kabuğu başlatılmaz ve model yanıtı bu ayarları değiştiremez. Çıktı,
+durum ve durdurma aynı pencerede görünür.
+
+Yerel sunucu profilleri de elle oluşturulur ve seçilir. Profil sabit bir `.exe`,
+seçili çalışma alanı içindeki çalışma klasörü ve sabit argümanlardan oluşur;
+komut kabukları profil olarak reddedilir. Başlatma, durdurma ve yeniden
+başlatma işlemleri yalnızca bu pencerede başlatılmış süreç için görünür
+durum/çıktı günlüğüyle yapılır. Uygulama kapanırken başlattığı süreç ağacını
+durdurur; profiller otomatik çalıştırılmaz. Bu özellik Render veya başka bir
+bulut sunucusunu yönetmez.
+
 ## Doğrulamalar
 
 Windows'ta istemci güvenlik/protokol kontrollerini çalıştırın:
@@ -79,5 +158,7 @@ dotnet run --project .\windows-app\tests\Cip.Windows.Tests.csproj
 ```
 
 Kontroller HTTPS zorunluluğunu, klasör sınırlarını, Windows dosya adlarını,
-eşleştirme isteğinin kimlik bilgisi göndermemesini ve eylem isteğinin PC
-token'ını kullanmasını kapsar.
+eşleştirme isteğinin kimlik bilgisi göndermemesini, eylem isteğinin PC token'ını
+kullanmasını, plan API'sinin veri biçimi/yol/boyut sınırlarını, güvenli dosya
+uygulamasını, yerel sunucu profili sınırlarını ve Build/Test iş akışlarının
+kabuksuz başlatma ve çalışma klasörü sınırlarını kapsar.
