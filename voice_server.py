@@ -1,5 +1,5 @@
 """
-Çip sesli asistan sunucusu (Render) — v4.0.
+Çip sesli asistan sunucusu (Render) — v4.5.
 
 Uç noktalar:
   GET  /                        -> sağlık/teşhis sayfası
@@ -47,7 +47,7 @@ from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
 from tuya_connector import TuyaOpenAPI
 import anthropic
 
-SURUM = "4.4"
+SURUM = "4.5"
 
 # ==================== LOG ====================
 logging.basicConfig(
