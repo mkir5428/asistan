@@ -1270,6 +1270,14 @@ public final class MainActivity extends Activity {
         if (text.isEmpty()) {
             return;
         }
+        String localAnswer = DeviceTimeAnswerer.answer(text);
+        if (localAnswer != null) {
+            messageInput.setText("");
+            addMessage("Sen", text);
+            pauseWakeWordService();
+            showAnswer(localAnswer);
+            return;
+        }
         DeviceCommandRouter.Result localAction = DeviceCommandRouter.route(text);
         if (localAction != null) {
             messageInput.setText("");
