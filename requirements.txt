@@ -3,3 +3,4 @@ gunicorn
 requests
 tuya-connector-python
 anthropic
+edge-tts
