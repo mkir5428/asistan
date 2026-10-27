@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .venv*
+android-app/.gradle/
+android-app/**/build/
+android-app/local.properties

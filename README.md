@@ -49,6 +49,20 @@ pip install -r requirements.txt
 python voice_server.py
 ```
 
+## Android uygulaması
+
+`android-app/` klasörü Çip için yerel Android istemcisidir. Metin ve mikrofonla
+`/komut` ile `/ses` uç noktalarını kullanır; yanıtları Türkçe seslendirir.
+İlk açılışta Render sunucu adresini ve `ASISTAN_API_KEY` değerini Ayarlar'a gir.
+Anahtar Android Keystore ile cihazda şifreli saklanır; APK'nın içine gömülmez.
+Uygulamayı başkalarıyla paylaşmak yine anahtarı korumaz: bu kişisel kullanım içindir.
+
+Android Studio'da `android-app/` klasörünü açıp Gradle eşitlemesini tamamla ve
+**Build > Build APK(s)** seç. Komut satırından `android-app/` klasöründe
+`.\gradlew.bat assembleDebug` (Windows) veya `./gradlew assembleDebug` çalıştır.
+Test APK'sı `android-app/app/build/outputs/apk/debug/app-debug.apk` konumuna çıkar.
+Build için Android SDK 36 ve JDK 17 veya üstü gerekir.
+
 ## Render Start Command (önerilen)
 
 ```
