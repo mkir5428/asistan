@@ -4,3 +4,5 @@ __pycache__/
 android-app/.gradle/
 android-app/**/build/
 android-app/local.properties
+windows-app/**/bin/
+windows-app/**/obj/

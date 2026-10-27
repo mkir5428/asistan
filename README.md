@@ -64,6 +64,13 @@ Android Studio'da `android-app/` klasörünü açıp Gradle eşitlemesini tamaml
 Test APK'sı `android-app/app/build/outputs/apk/debug/app-debug.apk` konumuna çıkar.
 Build için Android SDK 36 ve JDK 17 veya üstü gerekir.
 
+## Windows dosya aktarımı uygulaması
+
+`windows-app/` klasörü Android cihazla HTTPS üzerinden dosya aktarımı için
+Türkçe Windows masaüstü istemcisini içerir. Gereksinimler, eşleştirme ve
+güvenlik sınırları için [`windows-app/README.md`](windows-app/README.md)
+belgesine bakın.
+
 ## Bilgisayar ↔ telefon dosya aktarımı API'si
 
 Transfer API'si `/transfer/` altında ayrı kimlik bilgileri kullanır; `ASISTAN_API_KEY`
