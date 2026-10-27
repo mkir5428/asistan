@@ -12,7 +12,13 @@ var checks = new List<(string Name, Action Run)>
     ("Eylem kuyruğu PC token ile durumları getirir", CheckActionList),
     ("Android onayı olmadan dosya yüklemesi yapılamaz", CheckUploadApprovalGate),
     ("Onaylı yükleme doğru ham gövde ve başlıkları kullanır", CheckApprovedUpload),
-    ("Hazır indirme boyutu ve özeti doğrular", CheckReadyDownload)
+    ("Hazır indirme boyutu ve özeti doğrular", CheckReadyDownload),
+    ("Çalışma alanı yolları traversal ve Windows aygıt adlarını reddeder", CheckWorkspacePaths),
+    ("Plan API yalnızca seçili dosyaları gönderir ve yanıtı doğrular", CheckWorkspacePlanRequest),
+    ("Plan yanıtı tüm gönderilen dosyaları bir kez içermelidir", CheckWorkspacePlanValidation),
+    ("Plan API talimat, dosya ve gerçek JSON istek sınırlarını uygular", CheckWorkspacePlanLimits),
+    ("Plan değişiklikleri atomik yazılır ve eski dosya sürümü korunur", CheckWorkspaceAtomicWrite),
+    ("Yerel sunucu profilleri çalışma alanı dışı çalışma klasörünü ve kabukları reddeder", CheckServerProfiles)
 };
 
 foreach (var check in checks)
@@ -194,6 +200,163 @@ static void CheckReadyDownload()
     finally
     {
         Directory.Delete(directory, recursive: true);
+    }
+}
+
+static void CheckWorkspacePaths()
+{
+    Equal("src/main.cs", WorkspaceSecurity.ValidateRelativePath("src/main.cs"));
+    Throws<InvalidDataException>(() => WorkspaceSecurity.ValidateRelativePath("../secret.txt"));
+    Throws<InvalidDataException>(() => WorkspaceSecurity.ValidateRelativePath("src\\main.cs"));
+    Throws<InvalidDataException>(() => WorkspaceSecurity.ValidateRelativePath("src//main.cs"));
+    Throws<InvalidDataException>(() => WorkspaceSecurity.ValidateRelativePath("CON.txt"));
+    Throws<InvalidDataException>(() => WorkspaceSecurity.ValidateRelativePath("C:/secret.txt"));
+    Throws<EncoderFallbackException>(() => WorkspaceSecurity.ValidateRelativePath("bad-\uD800.txt"));
+    Throws<EncoderFallbackException>(() => WorkspaceSecurity.ValidateInstruction("bad-\uD800"));
+
+    var root = Path.Combine(Path.GetTempPath(), "cip-workspace-" + Guid.NewGuid().ToString("N"));
+    var outside = Path.Combine(Path.GetTempPath(), "cip-outside-" + Guid.NewGuid().ToString("N") + ".txt");
+    Directory.CreateDirectory(root);
+    File.WriteAllText(outside, "outside");
+    try
+    {
+        False(TransferSecurity.IsPathAllowed(outside, [root]));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+        File.Delete(outside);
+    }
+}
+
+static void CheckWorkspacePlanRequest()
+{
+    using var handler = new InspectHandler(async request =>
+    {
+        Equal(HttpMethod.Post, request.Method);
+        Equal("https://example.test/workspace/plan", request.RequestUri!.ToString());
+        Equal("Bearer", request.Headers.Authorization?.Scheme);
+        Equal(new string("planning-secret".ToCharArray()), request.Headers.Authorization?.Parameter);
+        Equal("application/json", request.Content!.Headers.ContentType?.MediaType);
+        var body = await request.Content.ReadAsStringAsync();
+        using var json = System.Text.Json.JsonDocument.Parse(body);
+        var root = json.RootElement;
+        Equal(2, root.EnumerateObject().Count());
+        Equal("Refactor this file", root.GetProperty("instruction").GetString());
+        var files = root.GetProperty("files");
+        Equal(1, files.GetArrayLength());
+        Equal(2, files[0].EnumerateObject().Count());
+        Equal("src/main.cs", files[0].GetProperty("path").GetString());
+        Equal("class Main {}", files[0].GetProperty("content").GetString());
+        return JsonResponse(
+            "{\"summary\":\"A concise plan\",\"changes\":[{\"relative_path\":\"src/main.cs\",\"replacement_content\":\"class Main { }\"}]}",
+            HttpStatusCode.OK);
+    });
+    using var client = new WorkspacePlanClient("https://example.test", "planning-secret", handler);
+    var response = client.CreatePlanAsync(
+        "Refactor this file",
+        [new WorkspacePlanFile { path = "src/main.cs", content = "class Main {}" }],
+        CancellationToken.None).GetAwaiter().GetResult();
+    Equal("A concise plan", response.summary);
+    Equal("src/main.cs", response.changes.Single().relative_path);
+    Equal("class Main { }", response.changes.Single().replacement_content);
+}
+
+static void CheckWorkspacePlanValidation()
+{
+    var submitted = new[]
+    {
+        new WorkspacePlanFile { path = "src/a.cs", content = "a" },
+        new WorkspacePlanFile { path = "src/b.cs", content = "b" }
+    };
+    var exact = new WorkspacePlanResponse
+    {
+        summary = "Two changes",
+        changes =
+        [
+            new WorkspacePlanChange { relative_path = "src/a.cs", replacement_content = "a2" },
+            new WorkspacePlanChange { relative_path = "src/b.cs", replacement_content = "b2" }
+        ]
+    };
+    Equal(2, WorkspaceSecurity.ValidatePlanResponse(exact, submitted).changes.Count);
+    exact.changes.RemoveAt(1);
+    Throws<InvalidDataException>(() => WorkspaceSecurity.ValidatePlanResponse(exact, submitted));
+    exact.changes.Add(new WorkspacePlanChange { relative_path = "../outside", replacement_content = "x" });
+    Throws<InvalidDataException>(() => WorkspaceSecurity.ValidatePlanResponse(exact, submitted));
+}
+
+static void CheckWorkspacePlanLimits()
+{
+    Throws<ArgumentException>(() => WorkspaceSecurity.ValidateInstruction(new string('x', 4001)));
+    Throws<InvalidDataException>(() => WorkspaceSecurity.ValidatePlanRequest(new WorkspacePlanRequest
+    {
+        instruction = "change",
+        files = [new WorkspacePlanFile { path = "large.txt", content = new string('x', 64 * 1024 + 1) }]
+    }));
+
+    var fileA = new WorkspacePlanFile { path = "a.txt", content = new string('"', 64 * 1024) };
+    var fileB = new WorkspacePlanFile { path = "b.txt", content = new string('"', 64 * 1024) };
+    var fileC = new WorkspacePlanFile { path = "c.txt", content = new string('"', 64 * 1024) };
+    var fileD = new WorkspacePlanFile { path = "d.txt", content = new string('"', 64 * 1024) };
+    var files = new[] { fileA, fileB, fileC, fileD };
+    using var handler = new InspectHandler((Func<HttpRequestMessage, HttpResponseMessage>)(_ =>
+        throw new InvalidOperationException("Sınır aşan plan isteği ağa gönderilmemeliydi.")));
+    using var client = new WorkspacePlanClient("https://example.test", "planning-secret", handler);
+    Throws<InvalidDataException>(() =>
+        client.CreatePlanAsync("change", files, CancellationToken.None).GetAwaiter().GetResult());
+}
+
+static void CheckWorkspaceAtomicWrite()
+{
+    var root = Path.Combine(Path.GetTempPath(), "cip-workspace-write-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var relativePath = "settings.txt";
+    var fullPath = Path.Combine(root, relativePath);
+    File.WriteAllText(fullPath, "before", new UTF8Encoding(false));
+    try
+    {
+        WorkspaceSecurity.WriteReplacementAtomically(root, relativePath, "before", "after");
+        Equal("after", File.ReadAllText(fullPath));
+        Throws<IOException>(() =>
+            WorkspaceSecurity.WriteReplacementAtomically(root, relativePath, "before", "stale overwrite"));
+        Equal("after", File.ReadAllText(fullPath));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void CheckServerProfiles()
+{
+    var root = Path.Combine(Path.GetTempPath(), "cip-server-profile-" + Guid.NewGuid().ToString("N"));
+    var outside = Path.Combine(Path.GetTempPath(), "cip-server-outside-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    Directory.CreateDirectory(outside);
+    var executable = Path.Combine(root, "server.exe");
+    File.WriteAllText(executable, "test");
+    var profile = new ServerProfile
+    {
+        Name = "test server",
+        WorkspaceRoot = root,
+        ExecutablePath = executable,
+        WorkingDirectory = root,
+        Arguments = "--port 8080"
+    };
+    try
+    {
+        WorkspaceSecurity.ValidateServerProfile(profile, root);
+        profile.WorkingDirectory = outside;
+        Throws<UnauthorizedAccessException>(() => WorkspaceSecurity.ValidateServerProfile(profile, root));
+        profile.WorkingDirectory = root;
+        profile.ExecutablePath = Path.Combine(root, "powershell.exe");
+        File.WriteAllText(profile.ExecutablePath, "test");
+        Throws<InvalidOperationException>(() => WorkspaceSecurity.ValidateServerProfile(profile, root));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+        Directory.Delete(outside, recursive: true);
     }
 }
 

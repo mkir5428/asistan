@@ -9,6 +9,44 @@ internal sealed class AppState
     public long PairingCodeExpiresAt { get; set; }
     public List<string> AllowedFolders { get; set; } = [];
     public Dictionary<string, string> SourceFilesByAction { get; set; } = [];
+    public string PlanningApiKey { get; set; } = "";
+    public string PlanningServerUrl { get; set; } = "";
+    public string WorkspaceRoot { get; set; } = "";
+    public List<string> WorkspaceFiles { get; set; } = [];
+    public List<ServerProfile> ServerProfiles { get; set; } = [];
+}
+
+internal sealed class ServerProfile
+{
+    public string Name { get; set; } = "";
+    public string WorkspaceRoot { get; set; } = "";
+    public string ExecutablePath { get; set; } = "";
+    public string WorkingDirectory { get; set; } = "";
+    public string Arguments { get; set; } = "";
+}
+
+internal sealed class WorkspacePlanFile
+{
+    public string path { get; set; } = "";
+    public string content { get; set; } = "";
+}
+
+internal sealed class WorkspacePlanRequest
+{
+    public string instruction { get; set; } = "";
+    public List<WorkspacePlanFile> files { get; set; } = [];
+}
+
+internal sealed class WorkspacePlanChange
+{
+    public string relative_path { get; set; } = "";
+    public string replacement_content { get; set; } = "";
+}
+
+internal sealed class WorkspacePlanResponse
+{
+    public string summary { get; set; } = "";
+    public List<WorkspacePlanChange> changes { get; set; } = [];
 }
 
 internal sealed class PairingCreated

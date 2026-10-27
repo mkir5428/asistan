@@ -115,6 +115,34 @@ Restart/deploy eşleşmeleri ve bekleyen transferleri siler; uygulama yeniden
 eşleştirilmelidir. Bilgisayar uygulaması açık ve ağa bağlı değilken aktarım
 yapılamaz. Sunucudaki rate limit ve kapasite hataları kullanıcıya gösterilir.
 
+## v4.6 çalışma alanı ve yerel sunucu
+
+**Çalışma alanı ve yerel sunucu** penceresinde bir proje klasörünü açıkça seçin.
+Planlama isteği yalnızca ayrıca seçtiğiniz 1-8 mevcut dosyanın UTF-8 içeriğini
+ve yazdığınız talimatı HTTPS `POST /workspace/plan` uç noktasına gönderir.
+Talimat 4.000 karakter; yol 240 karakter; her dosya 64 KiB, toplam içerik
+256 KiB ve JSON isteği 512 KiB ile sınırlıdır. Yanıtta dosya yolları tam olarak
+seçilen dosyalarla eşleşmelidir.
+`ASISTAN_API_KEY`, Windows hesabına bağlı DPAPI ile korunan ayarlarda tutulur ve
+yalnızca bu planlama uç noktasına gönderilir; transfer API'sinde kullanılmaz.
+
+Sunucudan dönen dosya yolları ve içerikler güvenilir kabul edilmez: istemci
+yalnızca gönderilen dosyalar için eksiksiz yanıtı kabul eder, yolları tekrar
+doğrular ve her dosyanın farkını gösterir. Dosyalar, **Apply** metnini yazarak
+onay vermeden yazılmaz. Uygulama öncesi dosya içeriğinin
+plan oluşturulduğundakiyle aynı olduğu doğrulanır; her dosya aynı klasördeki
+geçici dosyaya yazılıp atomik olarak değiştirilir. Planlanan kod veya komut
+çalıştırılmaz. Dosya seçim sınırları nedeniyle büyük/ikili dosyalar
+planlamaya gönderilemez.
+
+Yerel sunucu profilleri de elle oluşturulur ve seçilir. Profil sabit bir `.exe`,
+seçili çalışma alanı içindeki çalışma klasörü ve sabit argümanlardan oluşur;
+komut kabukları profil olarak reddedilir. Başlatma, durdurma ve yeniden
+başlatma işlemleri yalnızca bu pencerede başlatılmış süreç için görünür
+durum/çıktı günlüğüyle yapılır. Uygulama kapanırken başlattığı süreç ağacını
+durdurur; profil otomatik başlatılmaz. Bu özellik Render veya başka bir bulut
+sunucusunu yönetmez.
+
 ## Doğrulamalar
 
 Windows'ta istemci güvenlik/protokol kontrollerini çalıştırın:
