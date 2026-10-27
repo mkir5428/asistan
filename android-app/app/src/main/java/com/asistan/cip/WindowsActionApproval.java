@@ -2,11 +2,11 @@ package com.asistan.cip;
 
 import android.app.Activity;
 
-/** Approval boundary for future Windows actions; no server action is invoked here. */
+/** Produces a Keystore-backed signature after per-use Android biometric approval. */
 public interface WindowsActionApproval {
     interface Callback {
-        void onResult(boolean approved, String error);
+        void onResult(byte[] signature, String error);
     }
 
-    void requestApproval(Activity activity, String reason, Callback callback);
+    void signChallenge(Activity activity, String challenge, Callback callback);
 }

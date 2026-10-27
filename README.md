@@ -79,12 +79,6 @@ uç noktalarına gider.
 Anahtar Android Keystore ile cihazda şifreli saklanır; APK'nın içine gömülmez.
 Uygulamayı başkalarıyla paylaşmak yine anahtarı korumaz: bu kişisel kullanım içindir.
 
-Windows dosya işlemleri için bu uygulamada henüz sunucu uç noktası/sözleşmesi
-bulunmuyor. `WindowsActionApproval` arayüzü, gelecekteki sunucu adaptörünün her
-işlemden önce Android biyometrik onayı istemesi için test edilebilir bir sınır
-sağlar; mevcut `/komut` veya `/ses` protokolü değiştirilmez ve Windows işlemi
-uydurulmuş bir API'ye gönderilmez.
-
 Android Studio'da `android-app/` klasörünü açıp Gradle eşitlemesini tamamla ve
 **Build > Build APK(s)** seç. Komut satırından `android-app/` klasöründe
 `.\gradlew.bat assembleDebug` (Windows) veya `./gradlew assembleDebug` çalıştır.
@@ -271,6 +265,11 @@ istekleri farklı RAM durumlarına yönlendirip eşleştirme/aktarımı bozabili
 başlatma, çökme veya deploy bekleyen transferleri ve eşleşmeleri kaybettirir; istemci
 yeniden eşleşip aktarımı başlatmalıdır. 100 MiB sınırı tamponlanmış dosyaları kapsar;
 eşzamanlı isteklerin geçici RAM kullanımı buna eklenir.
+
+Android birim testleri için `android-app/` klasöründe
+`.\gradlew.bat testDebugUnitTest` çalıştır. Transfer testleri challenge alan
+sırasını, null challenge durumlarını, katı yanıt zarfını ve dosya boyutu
+sınırını denetler.
 
 ## Render Start Command (önerilen)
 
