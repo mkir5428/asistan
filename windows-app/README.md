@@ -78,7 +78,7 @@ ebeveyn/geçersiz segmentleri, ters eğik çizgileri, yinelenen yolları, NUL ve
 Windows aygıt adlarını reddeder. Yanıt yalnızca istenen yolların her birini bir
 kez içerebilir; sunucu dosya oluşturamaz, silemez, yazamaz veya kod çalıştıramaz.
 İstemci unified diff'i göstermeli ve dosyaları yalnızca kullanıcının açık
-**Uygula** onayıyla yazmalıdır. Hata yanıtları `{ "error": "..." }` biçimindedir;
+**Apply** metin onayıyla yazmalıdır. Hata yanıtları `{ "error": "..." }` biçimindedir;
 özellikle `provider_error` ve `invalid_model_response` durumlarında hiçbir
 değişiklik uygulanmamalıdır.
 
@@ -152,5 +152,6 @@ dotnet run --project .\windows-app\tests\Cip.Windows.Tests.csproj
 ```
 
 Kontroller HTTPS zorunluluğunu, klasör sınırlarını, Windows dosya adlarını,
-eşleştirme isteğinin kimlik bilgisi göndermemesini ve eylem isteğinin PC
-token'ını kullanmasını kapsar.
+eşleştirme isteğinin kimlik bilgisi göndermemesini, eylem isteğinin PC token'ını
+kullanmasını, plan API'sinin veri biçimi/yol/boyut sınırlarını, güvenli dosya
+uygulamasını ve yerel sunucu profili sınırlarını kapsar.
