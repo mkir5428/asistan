@@ -15,6 +15,50 @@ internal sealed class WorkspaceForm : Form
     private readonly TextBox apiKey = new() { Dock = DockStyle.Fill, UseSystemPasswordChar = true };
     private readonly TextBox instruction = new() { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.Vertical };
     private readonly Button createPlanButton = new() { Text = "Plan oluştur ve farkları incele", AutoSize = true, Height = 36 };
+    private readonly List<(string Path, AgentAnalysisAgent Agent)> analysisDocuments = [];
+    private readonly ListBox analysisAgentList = new() { Dock = DockStyle.Fill, IntegralHeight = false };
+    private readonly RichTextBox analysisPromptPreview = new()
+    {
+        Dock = DockStyle.Fill,
+        ReadOnly = true,
+        DetectUrls = false,
+        WordWrap = true,
+        BackColor = SystemColors.Window
+    };
+    private readonly TextBox analysisInstruction = new()
+    {
+        Dock = DockStyle.Fill,
+        Multiline = true,
+        ScrollBars = ScrollBars.Vertical
+    };
+    private readonly CheckBox analysisConsent = new()
+    {
+        AutoSize = false,
+        Dock = DockStyle.Fill,
+        TextAlign = ContentAlignment.MiddleLeft,
+        Text = "Onaylıyorum: talimat ve seçili tüm .md dosyalarının tam metni HTTPS üzerinden sunucuya gönderilip Claude tarafından analiz edilecek."
+    };
+    private readonly Button analyzeAgentsButton = new()
+    {
+        Text = "Uzman analizini başlat",
+        AutoSize = true,
+        Height = 36,
+        Enabled = false
+    };
+    private readonly Label analysisStatus = new()
+    {
+        AutoSize = true,
+        MaximumSize = new Size(520, 0),
+        Text = "Ajan seçin ve Claude'a gönderilecek tam metinleri inceleyin."
+    };
+    private readonly RichTextBox analysisResult = new()
+    {
+        Dock = DockStyle.Fill,
+        ReadOnly = true,
+        DetectUrls = false,
+        WordWrap = true,
+        BackColor = SystemColors.Window
+    };
     private readonly ListBox profiles = new() { Dock = DockStyle.Fill, DisplayMember = nameof(ServerProfile.Name) };
     private readonly TextBox profileName = new() { Dock = DockStyle.Fill };
     private readonly TextBox executablePath = new() { Dock = DockStyle.Fill, ReadOnly = true };
@@ -83,6 +127,7 @@ internal sealed class WorkspaceForm : Form
         FormClosed += (_, _) => lifetime.Dispose();
 
         BuildWorkspaceTab();
+        BuildAgentAnalysisTab();
         BuildServerTab();
         BuildWorkflowTab();
         Controls.Add(tabs);
@@ -161,6 +206,313 @@ internal sealed class WorkspaceForm : Form
         });
         layout.Controls.Add(planGroup, 0, 2);
         tabs.TabPages.Add(page);
+    }
+
+    private void BuildAgentAnalysisTab()
+    {
+        var page = new TabPage("Uzman analizi");
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            ColumnCount = 1,
+            RowCount = 4
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 48));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 20));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 74));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 32));
+        page.Controls.Add(layout);
+
+        var agentsGroup = new GroupBox
+        {
+            Text = "Claude'un seçebileceği yerel .md ajanları (en fazla 8)",
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8)
+        };
+        var agentsLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 2
+        };
+        agentsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
+        agentsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        agentsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        agentsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        agentsGroup.Controls.Add(agentsLayout);
+
+        var agentButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        var addAgents = new Button { Text = ".md ajanı seç", AutoSize = true };
+        addAgents.Click += (_, _) => AddAnalysisAgents();
+        agentButtons.Controls.Add(addAgents);
+        var removeAgent = new Button { Text = "Seçileni kaldır", AutoSize = true };
+        removeAgent.Click += (_, _) => RemoveAnalysisAgent();
+        agentButtons.Controls.Add(removeAgent);
+        agentsLayout.Controls.Add(agentButtons, 0, 0);
+        agentsLayout.Controls.Add(new Label
+        {
+            Text = "Gönderilecek tüm tam metinler aşağıda gösterilir; dosyalar yerel olarak değiştirilmez.",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            MaximumSize = new Size(600, 0)
+        }, 1, 0);
+        agentsLayout.Controls.Add(analysisAgentList, 0, 1);
+        agentsLayout.Controls.Add(analysisPromptPreview, 1, 1);
+        layout.Controls.Add(agentsGroup, 0, 0);
+
+        var instructionGroup = new GroupBox
+        {
+            Text = "Analiz talimatı",
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8)
+        };
+        instructionGroup.Controls.Add(analysisInstruction);
+        layout.Controls.Add(instructionGroup, 0, 1);
+
+        var consentLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 2
+        };
+        consentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        consentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+        consentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        consentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        consentLayout.Controls.Add(analysisConsent, 0, 0);
+        consentLayout.SetColumnSpan(analysisConsent, 2);
+        consentLayout.Controls.Add(analyzeAgentsButton, 0, 1);
+        consentLayout.Controls.Add(analysisStatus, 1, 1);
+        layout.Controls.Add(consentLayout, 0, 2);
+
+        var resultGroup = new GroupBox
+        {
+            Text = "Seçilen uzmanlar ve analiz sonucu",
+            Dock = DockStyle.Fill,
+            Padding = new Padding(8)
+        };
+        resultGroup.Controls.Add(analysisResult);
+        layout.Controls.Add(resultGroup, 0, 3);
+
+        analysisInstruction.MaxLength = AgentAnalysisSecurity.MaxInstructionCharacters;
+        analysisPromptPreview.MaxLength = 64 * 1024;
+        analysisConsent.CheckedChanged += (_, _) =>
+            analyzeAgentsButton.Enabled = analysisConsent.Checked && analysisDocuments.Count > 0;
+        analysisInstruction.TextChanged += (_, _) => ResetAnalysisConsent();
+        planningUrl.TextChanged += (_, _) => ResetAnalysisConsent();
+        apiKey.TextChanged += (_, _) => ResetAnalysisConsent();
+        analyzeAgentsButton.Click += async (_, _) => await AnalyzeAgentsAsync();
+        tabs.TabPages.Add(page);
+    }
+
+    private void AddAnalysisAgents()
+    {
+        using var picker = new OpenFileDialog
+        {
+            Title = "Claude'un değerlendirmesi için .md ajan tanımlarını seçin",
+            Filter = "Markdown ajan dosyaları (*.md)|*.md",
+            DefaultExt = "md",
+            CheckFileExists = true,
+            Multiselect = true
+        };
+        if (picker.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        try
+        {
+            var additions = new List<(string Path, AgentAnalysisAgent Agent)>();
+            var knownPaths = new HashSet<string>(
+                analysisDocuments.Select(document => document.Path),
+                StringComparer.OrdinalIgnoreCase);
+            var totalPromptBytes = analysisDocuments.Sum(document =>
+                Encoding.UTF8.GetByteCount(document.Agent.prompt));
+            foreach (var selectedPath in picker.FileNames)
+            {
+                var path = Path.GetFullPath(selectedPath);
+                if (!string.Equals(Path.GetExtension(path), ".md", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Yalnızca .md ajan dosyaları seçilebilir.");
+                if (!knownPaths.Add(path))
+                    continue;
+                if (analysisDocuments.Count + additions.Count >= AgentAnalysisSecurity.MaxAgents)
+                    throw new InvalidDataException($"En fazla {AgentAnalysisSecurity.MaxAgents} ajan seçilebilir.");
+
+                var bytes = ReadAgentPromptBytes(path);
+                var prompt = new UTF8Encoding(false, true).GetString(bytes);
+                var promptBytes = Encoding.UTF8.GetByteCount(prompt);
+                if (string.IsNullOrWhiteSpace(prompt) || prompt.Contains('\0'))
+                    throw new InvalidDataException("Ajan dosyası boş veya desteklenmeyen içerik taşıyor.");
+                if (promptBytes > AgentAnalysisSecurity.MaxPromptBytes)
+                    throw new InvalidDataException(
+                        $"Her ajan dosyası en fazla {AgentAnalysisSecurity.MaxPromptBytes / 1024} KiB olabilir.");
+                totalPromptBytes += promptBytes;
+                if (totalPromptBytes > AgentAnalysisSecurity.MaxTotalPromptBytes)
+                    throw new InvalidDataException(
+                        $"Seçilen tüm ajan metinlerinin toplamı {AgentAnalysisSecurity.MaxTotalPromptBytes / 1024} KiB sınırını aşamaz.");
+
+                var name = Path.GetFileNameWithoutExtension(path);
+                if (string.IsNullOrWhiteSpace(name)
+                    || name.Length > AgentAnalysisSecurity.MaxAgentNameCharacters
+                    || name.Any(character => character < 32 || character == 127))
+                    throw new InvalidDataException("Ajan dosyasının adı geçerli uzunlukta olmalıdır.");
+                additions.Add((path, new AgentAnalysisAgent
+                {
+                    id = $"agent-{analysisDocuments.Count + additions.Count + 1}",
+                    name = name,
+                    prompt = prompt
+                }));
+            }
+
+            analysisDocuments.AddRange(additions);
+            RefreshAnalysisAgentPreview();
+        }
+        catch (InvalidDataException error)
+        {
+            analysisStatus.Text = error.Message;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            analysisStatus.Text = error.Message;
+        }
+    }
+
+    private static byte[] ReadAgentPromptBytes(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (stream.Length > AgentAnalysisSecurity.MaxPromptBytes)
+            throw new InvalidDataException(
+                $"Her ajan dosyası en fazla {AgentAnalysisSecurity.MaxPromptBytes / 1024} KiB olabilir.");
+
+        var buffer = new byte[AgentAnalysisSecurity.MaxPromptBytes + 1];
+        var length = 0;
+        while (length < buffer.Length)
+        {
+            var read = stream.Read(buffer, length, buffer.Length - length);
+            if (read == 0)
+                break;
+            length += read;
+        }
+        if (length > AgentAnalysisSecurity.MaxPromptBytes || stream.ReadByte() != -1)
+            throw new InvalidDataException(
+                $"Her ajan dosyası en fazla {AgentAnalysisSecurity.MaxPromptBytes / 1024} KiB olabilir.");
+        return buffer[..length];
+    }
+
+    private void RemoveAnalysisAgent()
+    {
+        var index = analysisAgentList.SelectedIndex;
+        if (index < 0 || index >= analysisDocuments.Count)
+            return;
+        analysisDocuments.RemoveAt(index);
+        for (var item = 0; item < analysisDocuments.Count; item++)
+            analysisDocuments[item] = (
+                analysisDocuments[item].Path,
+                new AgentAnalysisAgent
+                {
+                    id = $"agent-{item + 1}",
+                    name = analysisDocuments[item].Agent.name,
+                    prompt = analysisDocuments[item].Agent.prompt
+                });
+        RefreshAnalysisAgentPreview();
+    }
+
+    private void RefreshAnalysisAgentPreview()
+    {
+        ResetAnalysisConsent();
+        analysisAgentList.Items.Clear();
+        var preview = new StringBuilder();
+        foreach (var document in analysisDocuments)
+        {
+            analysisAgentList.Items.Add(document.Agent.name);
+            preview.Append("=== ");
+            preview.Append(document.Agent.name);
+            preview.Append(" (");
+            preview.Append(Path.GetFileName(document.Path));
+            preview.AppendLine(") ===");
+            preview.Append(document.Agent.prompt);
+            if (!document.Agent.prompt.EndsWith('\n'))
+                preview.AppendLine();
+            preview.AppendLine();
+        }
+        analysisPromptPreview.Text = preview.ToString();
+        analysisStatus.Text = analysisDocuments.Count == 0
+            ? "Ajan seçin ve Claude'a gönderilecek tam metinleri inceleyin."
+            : $"{analysisDocuments.Count} ajan seçildi; tüm tam metinleri inceleyin ve açık onay verin.";
+        analysisResult.Clear();
+    }
+
+    private void ResetAnalysisConsent()
+    {
+        if (analysisConsent.Checked)
+            analysisConsent.Checked = false;
+        analyzeAgentsButton.Enabled = false;
+        analysisResult.Clear();
+    }
+
+    private async Task AnalyzeAgentsAsync()
+    {
+        if (!analysisConsent.Checked)
+            return;
+
+        analysisConsent.Checked = false;
+        analyzeAgentsButton.Enabled = false;
+        try
+        {
+            var url = TransferSecurity.ValidateServerUrl(planningUrl.Text);
+            var key = apiKey.Text;
+            var candidates = analysisDocuments.Select(document => document.Agent).ToList();
+            var request = AgentAnalysisSecurity.CreateRequest(
+                analysisInstruction.Text,
+                candidates,
+                userConsent: true);
+
+            analysisStatus.Text = "Analiz için yalnızca talimat ve önizlemede gösterilen ajan metinleri gönderiliyor...";
+            using var client = new AgentAnalysisClient(url, key);
+            var response = await client.AnalyzeAsync(
+                request.instruction,
+                request.agents,
+                userConsent: true,
+                lifetime.Token);
+            if (IsDisposed || lifetime.IsCancellationRequested)
+                return;
+
+            var result = new StringBuilder();
+            result.AppendLine("Claude'un seçtiği uzmanlar:");
+            if (response.selected_agents.Count == 0)
+                result.AppendLine("İstek için uygun uzman bulunamadı.");
+            else
+                foreach (var agent in response.selected_agents)
+                    result.AppendLine($"- {agent.name}");
+
+            foreach (var analysis in response.analyses)
+            {
+                var selectedAgent = response.selected_agents.Single(agent => agent.id == analysis.agent_id);
+                result.AppendLine();
+                result.AppendLine($"--- {selectedAgent.name} ---");
+                result.AppendLine(analysis.analysis);
+            }
+
+            result.AppendLine();
+            result.AppendLine("Birleştirilmiş değerlendirme:");
+            result.AppendLine(response.synthesis);
+            analysisResult.Text = result.ToString();
+            analysisStatus.Text = "Analiz tamamlandı. Sonuçlar yalnızca bu pencerenin geçici arayüz durumunda tutuluyor.";
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception error) when (error is ArgumentException or InvalidDataException)
+        {
+            analysisStatus.Text = error.Message;
+        }
+        catch
+        {
+            analysisStatus.Text = "Analiz tamamlanamadı. HTTPS sunucu adresini ve API anahtarını kontrol edip yeniden deneyin.";
+        }
+        finally
+        {
+            analyzeAgentsButton.Enabled = analysisConsent.Checked && analysisDocuments.Count > 0;
+        }
     }
 
     private void BuildServerTab()
