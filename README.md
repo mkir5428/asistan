@@ -19,6 +19,7 @@ alanlarıyla gönderilebilir.
 - `GET /seslendir?metin=Merhaba` → MP3 ses
 - `GET /temizle?session=...` → oturum hafızasını temizler
 - `POST /workspace/plan` → seçilmiş mevcut dosyalar için geçici değişiklik önerir
+- `POST /workspace/agents/analyze` → açıkça seçilip onaylanan ajan tanımlarından geçici analiz alır
 
 ## Render > Environment'da olması gerekenler
 
@@ -94,6 +95,41 @@ ve yazma işlemini yalnızca kullanıcının açık **Uygula** onayıyla yapmal�
 `provider_error` veya `invalid_model_response` hataları planın üretilemediğini
 belirtir; istemci değişiklik uygulamamalıdır.
 
+## Seçilmiş uzman ajanlarla analiz
+
+`POST /workspace/agents/analyze` API anahtarı ve HTTPS gerektirir. İstemci,
+kullanıcının seçtiği `.md` ajan tanımlarının kimlik, ad ve tam metnini isteğe
+koymalıdır. İstekten önce arayüz, görevle birlikte gönderilecek **tüm** ajan
+metinlerini (Claude'un seçim yapabilmesi için gönderilenler dahil) kullanıcıya
+göstermeli ve açık onay almalıdır. `consent: true` bu istemci onay sözleşmesinin
+zorunlu işaretidir; tek başına arayüz onayının kanıtı değildir.
+
+```json
+{
+  "instruction": "Bu tasarımı güvenlik ve sürdürülebilirlik açısından değerlendir.",
+  "consent": true,
+  "agents": [
+    {"id": "security-reviewer", "name": "Güvenlik inceleyicisi", "prompt": "Seçilmiş .md dosyasının tam metni"}
+  ]
+}
+```
+
+Sunucu Claude'a önce yalnızca istekteki adayları seçtiren bir planlama çağrısı
+yapar; Claude en fazla üç ajan seçer. Her seçilen ajanın Markdown metni, yalnızca
+kendi analiz çağrısına verilir; analizler birbirinden bağımsızdır ve son bir
+çağrı bunları sentezler. Hiçbir çağrıda araç, şema, dosya sistemi, kabuk veya
+eylem yürütme erişimi yoktur. Ajan Markdown'ı ve diğer istek içerikleri güvenilmez
+veri sayılır; çıktı yalnızca analiz/öneridir, kod veya dosya değişikliği uygulamaz.
+Bu, ayrı çalışan süreçler veya özerk/uygulanabilir ajanlar değildir.
+
+En fazla 8 ajan gönderilebilir; her prompt 16 KiB, toplam prompt metni 48 KiB,
+görev 4.000 karakter ve tüm istek 384 KiB ile sınırlıdır. Yanıtta seçilen ajanlar,
+ayrı analizleri ve sentez yer alır. Prompt'lar, görev ve sonuçlar sunucu
+tarafında saklanmaz; yalnızca istek işlenirken bellekte kullanılır. İstemci bu
+verileri Claude'a göndermeden önce göstermeli, kullanıcıdan izin almalı ve
+`provider_error` / `invalid_model_response` durumlarında sonuç üretildiğini
+varsaymamalıdır.
+
 ## Lokal çalıştırma
 
 ```bash
@@ -125,6 +161,10 @@ yalnızca Android arama ekranını, SMS yalnızca hazır mesaj ekranını açar;
 sessizce arama yapmaz, SMS göndermez veya tüm kişiler/dosyalara arka planda erişmez.
 Yerel komutlar dar bir listeden eşleştirilir; diğer komutlar mevcut sunucu
 uç noktalarına gider.
+“Saat kaç?” ve “bugün hangi gün?” gibi tanınan saat/tarih soruları, cihazın
+yerel saat dilimi ve dil ayarları kullanılarak internet veya API anahtarı
+gerektirmeden yanıtlanır; yazılı komutlarda ve “Hey Çip” sonrasındaki komutlarda
+aynı şekilde çalışır.
 
 İlk açılışta Render sunucu adresini ve `ASISTAN_API_KEY` değerini Ayarlar'a gir.
 Anahtar Android Keystore ile cihazda şifreli saklanır; APK'nın içine gömülmez.
@@ -142,6 +182,13 @@ Build için Android SDK 36 ve JDK 17 veya üstü gerekir.
 Türkçe Windows masaüstü istemcisini içerir. Gereksinimler, eşleştirme ve
 güvenlik sınırları için [`windows-app/README.md`](windows-app/README.md)
 belgesine bakın.
+
+Çalışma alanı penceresindeki **Uzman analizi** sekmesi, kullanıcının seçtiği
+1-8 adet `.md` ajan tanımını tam metinleriyle önizler. Talimat ve tüm seçili
+prompt'lar ancak açık onaydan sonra mevcut HTTPS sunucusuna ve Claude'a
+gönderilir; bu prompt'lar ve analiz sonuçları uygulama durumuna kaydedilmez.
+Sekme yalnızca uzman seçimi, analiz ve öneri gösterir; dosya düzenlemez,
+komut çalıştırmaz veya araç çağırmaz.
 
 ## Bilgisayar ↔ telefon dosya aktarımı API'si
 
