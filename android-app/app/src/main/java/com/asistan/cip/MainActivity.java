@@ -33,6 +33,7 @@ import android.view.WindowInsets;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.util.Base64;
+import android.util.Log;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -85,10 +86,12 @@ public final class MainActivity extends Activity {
     private static final String PREFERENCES = "cip_settings";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_SESSION = "session_id";
+    private static final String KEY_CHAT_HISTORY = "chat_history";
     private static final String KEY_API_SECRET = "encrypted_api_key";
     private static final String KEYSTORE_ALIAS = "cip_api_key";
 
     private final ExecutorService network = Executors.newSingleThreadExecutor();
+    private ConversationHistory conversationHistory = new ConversationHistory();
     private SharedPreferences preferences;
     private LinearLayout conversation;
     private ScrollView conversationScroll;
@@ -147,6 +150,13 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE);
+        try {
+            conversationHistory = ConversationHistory.fromJson(
+                    preferences.getString(KEY_CHAT_HISTORY, ""));
+        } catch (org.json.JSONException error) {
+            Log.w("Cip", "Saved conversation history could not be restored.", error);
+            preferences.edit().remove(KEY_CHAT_HISTORY).apply();
+        }
         transferCredentialStore = new TransferCredentialStore(preferences);
         if (preferences.getString(KEY_SESSION, null) == null) {
             preferences.edit().putString(KEY_SESSION, UUID.randomUUID().toString()).apply();
@@ -283,7 +293,13 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams chatParams = new LinearLayout.LayoutParams(-1, 0, 1);
         chatParams.bottomMargin = dp(12);
         root.addView(chatPanel, chatParams);
-        addMessage("Çip", getString(R.string.welcome_message));
+        if (conversationHistory.entries().isEmpty()) {
+            addMessage("Çip", getString(R.string.welcome_message));
+        } else {
+            for (ConversationHistory.Entry entry : conversationHistory.entries()) {
+                renderMessage(entry.sender, entry.text);
+            }
+        }
 
         LinearLayout composer = new LinearLayout(this);
         composer.setOrientation(LinearLayout.VERTICAL);
@@ -1462,7 +1478,8 @@ public final class MainActivity extends Activity {
                     break;
             }
         } catch (Exception error) {
-            showError(error);
+            Log.e("Cip", "Unable to open Android device action " + action + ".", error);
+            addMessage("Hata", DeviceActionErrorMapper.message(action, error));
             resumeWakeWordServiceIfActive();
         }
     }
@@ -1479,7 +1496,12 @@ public final class MainActivity extends Activity {
                 number = cursor.getString(0);
             }
         } catch (Exception error) {
-            showError(error);
+            Log.e("Cip", "Unable to read the selected contact.", error);
+            addMessage("Hata", DeviceActionErrorMapper.message(
+                    composeSms ? DeviceCommandRouter.Action.PICK_PHONE_FOR_SMS
+                            : DeviceCommandRouter.Action.PICK_PHONE_TO_CALL, error));
+            resumeWakeWordServiceIfActive();
+            return;
         }
         if (number == null || number.trim().isEmpty()) {
             addMessage("Hata", "Seçilen kişide kullanılabilir bir telefon numarası yok.");
@@ -1647,7 +1669,10 @@ public final class MainActivity extends Activity {
     private String readResponse(HttpURLConnection connection) throws Exception {
         try {
             int status = connection.getResponseCode();
-            InputStream stream = status >= 200 && status < 400 ? connection.getInputStream() : connection.getErrorStream();
+            if (status < 200 || status >= 300) {
+                throw new ChatErrorMapper.ServerResponseException(status);
+            }
+            InputStream stream = connection.getInputStream();
             StringBuilder body = new StringBuilder();
             if (stream != null) {
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
@@ -1656,12 +1681,6 @@ public final class MainActivity extends Activity {
                         body.append(line);
                     }
                 }
-            }
-            if (status == 401) {
-                throw new IllegalStateException("API anahtarı geçersiz. Ayarlar'dan kontrol et.");
-            }
-            if (status < 200 || status >= 300) {
-                throw new IllegalStateException("Sunucu " + status + " yanıtı verdi: " + body);
             }
             return body.toString();
         } finally {
@@ -1682,16 +1701,31 @@ public final class MainActivity extends Activity {
     }
 
     private void showError(Exception error) {
-        addMessage("Hata", error.getMessage() == null ? "Sunucuya bağlanılamadı." : error.getMessage());
+        Log.e("Cip", "Chat or device request failed.", error);
+        addMessage("Hata", ChatErrorMapper.message(error));
         resumeWakeWordServiceIfActive();
     }
 
     private void addMessage(String sender, String text) {
+        conversationHistory.append(sender, text);
+        try {
+            preferences.edit().putString(KEY_CHAT_HISTORY, conversationHistory.toJson()).apply();
+        } catch (org.json.JSONException error) {
+            Log.e("Cip", "Conversation history could not be saved.", error);
+        }
+        renderMessage(sender, text);
+    }
+
+    private void renderMessage(String sender, String text) {
         boolean isUser = sender.equals("Sen");
         LinearLayout message = new LinearLayout(this);
         message.setOrientation(LinearLayout.VERTICAL);
-        message.setPadding(dp(14), dp(10), dp(14), dp(10));
-        message.setBackground(roundedBackground(isUser ? 0xFF17362F : 0xFF17222E,
+        message.setGravity(isUser ? Gravity.END : Gravity.START);
+        message.setPadding(0, 0, 0, dp(8));
+        LinearLayout bubble = new LinearLayout(this);
+        bubble.setOrientation(LinearLayout.VERTICAL);
+        bubble.setPadding(dp(14), dp(10), dp(14), dp(10));
+        bubble.setBackground(roundedBackground(isUser ? 0xFF17362F : 0xFF17222E,
                 dp(18), isUser ? 0xFF285B4D : 0xFF2A3A49));
         TextView author = new TextView(this);
         author.setText(isUser ? R.string.message_author_user
@@ -1701,17 +1735,18 @@ public final class MainActivity extends Activity {
         author.setTypeface(null, android.graphics.Typeface.BOLD);
         author.setTextColor(isUser ? 0xFF70E7BD
                 : sender.equals("Çip") ? 0xFF8AC9E8 : 0xFFFFB18D);
-        message.addView(author);
+        bubble.addView(author);
         TextView body = new TextView(this);
         body.setText(text);
         body.setTextSize(15);
         body.setTextColor(0xFFE1EAF0);
         body.setLineSpacing(dp(2), 1.0f);
         body.setPadding(0, dp(3), 0, 0);
-        message.addView(body);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
-        params.bottomMargin = dp(8);
-        conversation.addView(message, params);
+        int conversationWidth = getResources().getDisplayMetrics().widthPixels - dp(68);
+        body.setMaxWidth(Math.max(dp(120), (int) (conversationWidth * 0.8f) - dp(28)));
+        bubble.addView(body);
+        message.addView(bubble, new LinearLayout.LayoutParams(-2, -2));
+        conversation.addView(message, new LinearLayout.LayoutParams(-1, -2));
         if (animationsEnabled()) {
             message.setAlpha(0f);
             message.setTranslationY(dp(8));
