@@ -511,7 +511,7 @@ def isle_komut(metin: str, gecmis: list = None, profil: str = ""):
 
     try:
         return duz_metin(claude_cevap(metin, gecmis, profil))
-    except Exception as e:
+    except Exception:
         log.exception("Claude hatası")
         return duz_metin("Cevap üretirken hata oldu. Lütfen daha sonra tekrar deneyin.")
 
