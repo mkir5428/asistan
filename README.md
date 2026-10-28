@@ -19,6 +19,7 @@ alanlarıyla gönderilebilir.
 - `GET /seslendir?metin=Merhaba` → MP3 ses
 - `GET /temizle?session=...` → oturum hafızasını temizler
 - `POST /workspace/plan` → seçilmiş mevcut dosyalar için geçici değişiklik önerir
+- `POST /workspace/agents/analyze` → açıkça seçilip onaylanan ajan tanımlarından geçici analiz alır
 
 ## Render > Environment'da olması gerekenler
 
@@ -93,6 +94,41 @@ noktası olmadığını ayrıca doğrulamalı, her dosya için unified diff gös
 ve yazma işlemini yalnızca kullanıcının açık **Uygula** onayıyla yapmalıdır.
 `provider_error` veya `invalid_model_response` hataları planın üretilemediğini
 belirtir; istemci değişiklik uygulamamalıdır.
+
+## Seçilmiş uzman ajanlarla analiz
+
+`POST /workspace/agents/analyze` API anahtarı ve HTTPS gerektirir. İstemci,
+kullanıcının seçtiği `.md` ajan tanımlarının kimlik, ad ve tam metnini isteğe
+koymalıdır. İstekten önce arayüz, görevle birlikte gönderilecek **tüm** ajan
+metinlerini (Claude'un seçim yapabilmesi için gönderilenler dahil) kullanıcıya
+göstermeli ve açık onay almalıdır. `consent: true` bu istemci onay sözleşmesinin
+zorunlu işaretidir; tek başına arayüz onayının kanıtı değildir.
+
+```json
+{
+  "instruction": "Bu tasarımı güvenlik ve sürdürülebilirlik açısından değerlendir.",
+  "consent": true,
+  "agents": [
+    {"id": "security-reviewer", "name": "Güvenlik inceleyicisi", "prompt": "Seçilmiş .md dosyasının tam metni"}
+  ]
+}
+```
+
+Sunucu Claude'a önce yalnızca istekteki adayları seçtiren bir planlama çağrısı
+yapar; Claude en fazla üç ajan seçer. Her seçilen ajanın Markdown metni, yalnızca
+kendi analiz çağrısına verilir; analizler birbirinden bağımsızdır ve son bir
+çağrı bunları sentezler. Hiçbir çağrıda araç, şema, dosya sistemi, kabuk veya
+eylem yürütme erişimi yoktur. Ajan Markdown'ı ve diğer istek içerikleri güvenilmez
+veri sayılır; çıktı yalnızca analiz/öneridir, kod veya dosya değişikliği uygulamaz.
+Bu, ayrı çalışan süreçler veya özerk/uygulanabilir ajanlar değildir.
+
+En fazla 8 ajan gönderilebilir; her prompt 16 KiB, toplam prompt metni 48 KiB,
+görev 4.000 karakter ve tüm istek 384 KiB ile sınırlıdır. Yanıtta seçilen ajanlar,
+ayrı analizleri ve sentez yer alır. Prompt'lar, görev ve sonuçlar sunucu
+tarafında saklanmaz; yalnızca istek işlenirken bellekte kullanılır. İstemci bu
+verileri Claude'a göndermeden önce göstermeli, kullanıcıdan izin almalı ve
+`provider_error` / `invalid_model_response` durumlarında sonuç üretildiğini
+varsaymamalıdır.
 
 ## Lokal çalıştırma
 
