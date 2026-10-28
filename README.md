@@ -179,6 +179,13 @@ Türkçe Windows masaüstü istemcisini içerir. Gereksinimler, eşleştirme ve
 güvenlik sınırları için [`windows-app/README.md`](windows-app/README.md)
 belgesine bakın.
 
+Çalışma alanı penceresindeki **Uzman analizi** sekmesi, kullanıcının seçtiği
+1-8 adet `.md` ajan tanımını tam metinleriyle önizler. Talimat ve tüm seçili
+prompt'lar ancak açık onaydan sonra mevcut HTTPS sunucusuna ve Claude'a
+gönderilir; bu prompt'lar ve analiz sonuçları uygulama durumuna kaydedilmez.
+Sekme yalnızca uzman seçimi, analiz ve öneri gösterir; dosya düzenlemez,
+komut çalıştırmaz veya araç çağırmaz.
+
 ## Bilgisayar ↔ telefon dosya aktarımı API'si
 
 Transfer API'si `/transfer/` altında ayrı kimlik bilgileri kullanır; `ASISTAN_API_KEY`

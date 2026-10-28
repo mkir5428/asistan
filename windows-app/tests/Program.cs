@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using Cip.Windows;
 
 var checks = new List<(string Name, Action Run)>
@@ -17,6 +18,9 @@ var checks = new List<(string Name, Action Run)>
     ("Plan API yalnızca seçili dosyaları gönderir ve yanıtı doğrular", CheckWorkspacePlanRequest),
     ("Plan yanıtı tüm gönderilen dosyaları bir kez içermelidir", CheckWorkspacePlanValidation),
     ("Plan API talimat, dosya ve gerçek JSON istek sınırlarını uygular", CheckWorkspacePlanLimits),
+    ("Ajan analizi isteği onaylı tam metinleri HTTPS API'sine eşler", CheckAgentAnalysisRequest),
+    ("Ajan analizi açık onay olmadan ağa çıkmaz", CheckAgentAnalysisConsentGate),
+    ("Ajan analizi talimat, ajan ve prompt boyutu sınırlarını uygular", CheckAgentAnalysisLimits),
     ("Plan değişiklikleri atomik yazılır ve eski dosya sürümü korunur", CheckWorkspaceAtomicWrite),
     ("Yerel sunucu profilleri çalışma alanı dışı çalışma klasörünü ve kabukları reddeder", CheckServerProfiles),
     ("Build/Test iş akışları kabuk başlatmaz ve çalışma alanı dışı klasörleri reddeder", CheckProjectWorkflows)
@@ -305,6 +309,125 @@ static void CheckWorkspacePlanLimits()
     using var client = new WorkspacePlanClient("https://example.test", "planning-secret", handler);
     Throws<InvalidDataException>(() =>
         client.CreatePlanAsync("change", files, CancellationToken.None).GetAwaiter().GetResult());
+}
+
+static void CheckAgentAnalysisRequest()
+{
+    var agents = new[]
+    {
+        new AgentAnalysisAgent { id = "agent-1", name = "Security", prompt = "Review security." },
+        new AgentAnalysisAgent { id = "agent-2", name = "Architecture", prompt = "Review boundaries." }
+    };
+    using var handler = new InspectHandler(async request =>
+    {
+        Equal(HttpMethod.Post, request.Method);
+        Equal("https://example.test/workspace/agents/analyze", request.RequestUri!.ToString());
+        Equal("Bearer planning-secret", request.Headers.Authorization?.ToString());
+        Equal("application/json", request.Content!.Headers.ContentType?.MediaType);
+        var body = await request.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+        var root = json.RootElement;
+        Equal(3, root.EnumerateObject().Count());
+        Equal("Review this design.", root.GetProperty("instruction").GetString());
+        True(root.GetProperty("consent").GetBoolean());
+        var submitted = root.GetProperty("agents");
+        Equal(2, submitted.GetArrayLength());
+        Equal("agent-1", submitted[0].GetProperty("id").GetString());
+        Equal("Security", submitted[0].GetProperty("name").GetString());
+        Equal("Review security.", submitted[0].GetProperty("prompt").GetString());
+        Equal("agent-2", submitted[1].GetProperty("id").GetString());
+        Equal("Review boundaries.", submitted[1].GetProperty("prompt").GetString());
+        return JsonResponse(
+            "{\"selected_agents\":[{\"id\":\"agent-2\",\"name\":\"Architecture\"}],"
+            + "\"analyses\":[{\"agent_id\":\"agent-2\",\"analysis\":\"Keep boundaries explicit.\"}],"
+            + "\"synthesis\":\"Separate responsibilities and test the boundary.\"}",
+            HttpStatusCode.OK);
+    });
+    using var client = new AgentAnalysisClient("https://example.test", "planning-secret", handler);
+    var response = client.AnalyzeAsync(
+        "  Review this design.  ",
+        agents,
+        userConsent: true,
+        CancellationToken.None).GetAwaiter().GetResult();
+    Equal("agent-2", response.selected_agents.Single().id);
+    Equal("Keep boundaries explicit.", response.analyses.Single().analysis);
+    Equal("Separate responsibilities and test the boundary.", response.synthesis);
+}
+
+static void CheckAgentAnalysisConsentGate()
+{
+    using var handler = new InspectHandler((Func<HttpRequestMessage, HttpResponseMessage>)(_ =>
+        throw new InvalidOperationException("Onaysız analiz HTTP isteği göndermemeliydi.")));
+    using var client = new AgentAnalysisClient("https://example.test", "planning-secret", handler);
+    Throws<InvalidOperationException>(() => client.AnalyzeAsync(
+        "Review this design.",
+        [new AgentAnalysisAgent { id = "agent-1", name = "Reviewer", prompt = "Review it." }],
+        userConsent: false,
+        CancellationToken.None).GetAwaiter().GetResult());
+}
+
+static void CheckAgentAnalysisLimits()
+{
+    var oneAgent = new[] { new AgentAnalysisAgent { id = "agent-1", name = "Reviewer", prompt = "Review it." } };
+    var maxCandidates = Enumerable.Range(1, AgentAnalysisSecurity.MaxAgents)
+        .Select(index => new AgentAnalysisAgent
+        {
+            id = $"agent-{index}",
+            name = "Reviewer",
+            prompt = "Review it."
+        })
+        .ToArray();
+    Equal(AgentAnalysisSecurity.MaxAgents,
+        AgentAnalysisSecurity.CreateRequest("Review", maxCandidates, true).agents.Count);
+    var maxPromptAgents = Enumerable.Range(1, 3)
+        .Select(index => new AgentAnalysisAgent
+        {
+            id = $"agent-{index}",
+            name = "Reviewer",
+            prompt = new string('x', AgentAnalysisSecurity.MaxPromptBytes)
+        })
+        .ToArray();
+    var maxPromptsRequest = AgentAnalysisSecurity.CreateRequest("Review", maxPromptAgents, true);
+    Equal(AgentAnalysisSecurity.MaxTotalPromptBytes,
+        maxPromptsRequest.agents.Sum(agent => Encoding.UTF8.GetByteCount(agent.prompt)));
+    True(JsonSerializer.SerializeToUtf8Bytes(maxPromptsRequest).Length <= AgentAnalysisSecurity.MaxRequestBytes);
+
+    Throws<ArgumentException>(() => AgentAnalysisSecurity.CreateRequest(
+        new string('x', AgentAnalysisSecurity.MaxInstructionCharacters + 1), oneAgent, true));
+    Throws<ArgumentException>(() => AgentAnalysisSecurity.CreateRequest(
+        "Review", [], true));
+    Throws<ArgumentException>(() => AgentAnalysisSecurity.CreateRequest(
+        "Review",
+        Enumerable.Range(1, AgentAnalysisSecurity.MaxAgents + 1)
+            .Select(index => new AgentAnalysisAgent
+            {
+                id = $"agent-{index}",
+                name = "Reviewer",
+                prompt = "Review it."
+            })
+            .ToArray(),
+        true));
+    Throws<InvalidDataException>(() => AgentAnalysisSecurity.CreateRequest(
+        "Review",
+        [new AgentAnalysisAgent
+        {
+            id = "agent-1",
+            name = "Reviewer",
+            prompt = new string('x', AgentAnalysisSecurity.MaxPromptBytes + 1)
+        }],
+        true));
+    Throws<InvalidDataException>(() => AgentAnalysisSecurity.CreateRequest(
+        "Review",
+        Enumerable.Range(1, 5)
+            .Select(index => new AgentAnalysisAgent
+            {
+                id = $"agent-{index}",
+                name = "Reviewer",
+                prompt = new string('x', 10_000)
+            })
+            .ToArray(),
+        true));
+    Throws<InvalidOperationException>(() => AgentAnalysisSecurity.CreateRequest("Review", oneAgent, false));
 }
 
 static void CheckWorkspaceAtomicWrite()
