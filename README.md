@@ -155,10 +155,30 @@ uygulamada hata gösterir. Bu sürümde konuşmacı profili/eşleşmesi uygulanm
 uyandırma sözcüğü ses kimliğini doğrulamaz ve hiçbir ses eşleşmesi ses taklidi
 veya kayıtla kandırılmaya karşı güvenlik garantisi olarak kullanılmamalıdır.
 
-Dosyalar Android sistem belge seçicisiyle, kişiler telefon numarası seçicisiyle,
-takvim etkinlikleri takvim uygulamasının kendi onay ekranıyla açılır. Arama
-yalnızca Android arama ekranını, SMS yalnızca hazır mesaj ekranını açar; uygulama
-sessizce arama yapmaz, SMS göndermez veya tüm kişiler/dosyalara arka planda erişmez.
+Dosyalar Android sistem belge seçicisiyle, takvim etkinlikleri takvim
+uygulamasının kendi onay ekranıyla açılır. Kişiyi arama/SMS için seçme akışı
+Android'in telefon numarası seçicisini kullanır. `Rehberde Ayşe'yi ara` veya
+`Ayşe'nin numarası ne?` gibi açık kişi arama komutlarında uygulama önce neden
+gerektiğini açıklar, ardından Android `READ_CONTACTS` iznini ister. Arama ve
+sonuçlar cihazda kalır; bu akış rehber bilgisini sunucuya göndermez veya sohbet
+geçmişine kaydetmez. İzin başlangıçta istenmez. Arama yalnızca Android arama
+ekranını, SMS yalnızca hazır mesaj ekranını açar; uygulama sessizce arama yapmaz,
+SMS göndermez veya tüm kişiler/dosyalara arka planda erişmez.
+
+Metin sohbeti, en fazla 20 tamamlanmış önceki kullanıcı/asistan turunu `/komut`
+isteğine bağlam olarak ekler; geçerli kullanıcı mesajı ikinci kez eklenmez ve hata
+bildirimleri konuşma bağlamına girmez. “Sohbet geçmişini temizle” önce cihazdaki
+geçmişi siler ve sunucuya boş bağlam göndererek eski sunucu oturum belleğinin geri
+gelmesini önler. Çip, Android'de sunulmayan cihaz erişimi veya işlemleri yaptığını
+iddia etmemesi için yönlendirilir.
+
+Android'deki **Uzman analizi** düğmesi, kullanıcının seçtiği 1-8 `.md` uzman
+tanımını tam metinleriyle gösterir. Talimat ve seçili dosyalar yalnızca
+HTTPS üzerinden, açık gönderim onayından sonra `/workspace/agents/analyze`
+uç noktasına iletilir. Analiz yalnızca öneri üretir; dosya değiştirmez,
+komut çalıştırmaz veya araç çağırmaz. Dosyalar ve sonuçlar yerel geçmişe
+kaydedilmez; hazır ajan tanımları kendiliğinden eklenmez.
+
 Yerel komutlar dar bir listeden eşleştirilir; diğer komutlar mevcut sunucu
 uç noktalarına gider.
 “Saat kaç?” ve “bugün hangi gün?” gibi tanınan saat/tarih soruları, cihazın

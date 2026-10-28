@@ -23,7 +23,7 @@ final class ChatErrorMapper {
                 return "API anahtarı doğrulanamadı. Ayarlar'dan kontrol et.";
             }
             if (status == 403) {
-                return "Sunucu bu isteğe izin vermedi. Sunucu ayarlarını veya API erişim yetkisini kontrol et.";
+                return "Sunucu/API isteği yetki nedeniyle reddedildi. Bu bir Android cihaz izni değil; sunucu erişim yetkisini kontrol et.";
             }
             if (status == 404) {
                 return "Sunucu adresi veya sohbet hizmeti bulunamadı. Ayarlar'daki adresi kontrol et.";

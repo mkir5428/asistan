@@ -13,9 +13,10 @@ public class ChatErrorMapperTest {
     public void mapsServerStatusesWithoutExposingResponseDetails() {
         String denied = ChatErrorMapper.message(new ChatErrorMapper.ServerResponseException(403));
 
-        assertEquals("Sunucu bu isteğe izin vermedi. Sunucu ayarlarını veya API erişim yetkisini kontrol et.",
+        assertEquals("Sunucu/API isteği yetki nedeniyle reddedildi. Bu bir Android cihaz izni değil; sunucu erişim yetkisini kontrol et.",
                 denied);
         assertFalse(denied.contains("403"));
+        assertFalse(denied.contains("Kişiler izni"));
         assertFalse(denied.contains("Exception"));
     }
 

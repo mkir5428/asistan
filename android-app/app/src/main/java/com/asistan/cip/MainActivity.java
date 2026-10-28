@@ -25,6 +25,8 @@ import android.os.Looper;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.text.InputType;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.view.Gravity;
@@ -35,6 +37,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.util.Base64;
 import android.util.Log;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -58,11 +61,18 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -82,6 +92,8 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_NATIVE_ACTIVITY = 54;
     private static final int REQUEST_TRANSFER_SAVE = 55;
     private static final int REQUEST_TRANSFER_UPLOAD = 56;
+    private static final int REQUEST_PICK_ANALYSIS_AGENTS = 57;
+    private static final int REQUEST_CONTACT_LOOKUP = 58;
     private static final long TRANSFER_POLL_INTERVAL_MS = 5000L;
     private static final String PREFERENCES = "cip_settings";
     private static final String KEY_SERVER_URL = "server_url";
@@ -98,6 +110,7 @@ public final class MainActivity extends Activity {
     private EditText messageInput;
     private Button sendButton;
     private Button recordButton;
+    private Button analysisButton;
     private Button wakeWordButton;
     private TextView wakeIndicator;
     private TextView wakeStatus;
@@ -124,6 +137,15 @@ public final class MainActivity extends Activity {
     private File transferDownloadFile;
     private TransferAction transferActionAwaitingUpload;
     private File transferUploadFile;
+    private AlertDialog analysisDialog;
+    private EditText analysisInstruction;
+    private TextView analysisPreview;
+    private CheckBox analysisConsent;
+    private Button analysisSubmitButton;
+    private String analysisConsentConfiguration;
+    private final List<AgentAnalysisClient.Agent> selectedAnalysisAgents = new ArrayList<>();
+    private final Set<String> selectedAnalysisUris = new HashSet<>();
+    private String pendingContactQuery;
 
     private final Runnable transferPollRunnable = new Runnable() {
         @Override
@@ -347,15 +369,23 @@ public final class MainActivity extends Activity {
         recordButton.setContentDescription(getString(R.string.record_content_description));
         recordButton.setOnClickListener(view -> toggleRecording());
         actions.addView(recordButton, new LinearLayout.LayoutParams(0, -2, 1));
+        analysisButton = new Button(this);
+        analysisButton.setText("Uzman analizi");
+        styleButton(analysisButton, 0xFF1D3140, 0xFFB7D7E8, 0xFF304A5C);
+        analysisButton.setOnClickListener(view -> showAgentAnalysisDialog());
+        LinearLayout.LayoutParams analysisParams = new LinearLayout.LayoutParams(0, -2, 1);
+        analysisParams.leftMargin = dp(8);
+        actions.addView(analysisButton, analysisParams);
+        LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(-1, -2);
+        actionsParams.topMargin = dp(6);
+        composer.addView(actions, actionsParams);
         TextView privacyNote = new TextView(this);
         privacyNote.setText(R.string.microphone_permission_note);
         privacyNote.setTextSize(11);
         privacyNote.setTextColor(0xFF8293A0);
         privacyNote.setGravity(Gravity.CENTER);
-        actions.addView(privacyNote, new LinearLayout.LayoutParams(0, -2, 1));
-        LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(-1, -2);
-        actionsParams.topMargin = dp(6);
-        composer.addView(actions, actionsParams);
+        privacyNote.setPadding(0, dp(4), 0, 0);
+        composer.addView(privacyNote);
         LinearLayout.LayoutParams composerParams = new LinearLayout.LayoutParams(-1, -2);
         composerParams.bottomMargin = dp(10);
         root.addView(composer, composerParams);
@@ -1286,6 +1316,13 @@ public final class MainActivity extends Activity {
         if (text.isEmpty()) {
             return;
         }
+        String contactName = ContactLookupCommand.extractName(text);
+        if (contactName != null) {
+            messageInput.setText("");
+            showLocalMessage("Yerel", text);
+            requestContactLookup(contactName);
+            return;
+        }
         String localAnswer = DeviceTimeAnswerer.answer(text);
         if (localAnswer != null) {
             messageInput.setText("");
@@ -1301,7 +1338,15 @@ public final class MainActivity extends Activity {
             launchDeviceAction(localAction.action, localAction.phoneNumber);
             return;
         }
+        boolean clearHistory = ConversationHistory.isClearHistoryCommand(text);
+        if (clearHistory) {
+            clearConversation();
+        }
         if (!ensureConfigured()) {
+            if (clearHistory) {
+                addMessage("Sen", text);
+                addMessage("Hata", "Bu cihazdaki sohbet geçmişi temizlendi; sunucu hafızası bağlantı olmadan temizlenemedi.");
+            }
             resumeWakeWordServiceIfActive();
             return;
         }
@@ -1310,16 +1355,485 @@ public final class MainActivity extends Activity {
         pauseWakeWordService();
         setBusy(true);
         final String command = text;
+        final String context;
+        try {
+            context = clearHistory ? "[]" : conversationHistory.apiMessages(command).toString();
+        } catch (org.json.JSONException error) {
+            showError(error);
+            setBusy(false);
+            return;
+        }
         network.execute(() -> {
             try {
-                String answer = postForm("/komut", "text", command, "session", sessionId());
-                runOnUiThread(() -> showAnswer(answer));
+                String answer = postForm("/komut", "text", command, "session", sessionId(),
+                        "gecmis", context);
+                runOnUiThread(() -> {
+                    if (clearHistory) {
+                        clearConversation();
+                        addMessage("Sen", command);
+                    }
+                    showAnswer(answer);
+                });
             } catch (Exception error) {
                 runOnUiThread(() -> showError(error));
             } finally {
                 runOnUiThread(() -> setBusy(false));
             }
         });
+    }
+
+    private void showAgentAnalysisDialog() {
+        if (!ensureConfigured()) {
+            return;
+        }
+        selectedAnalysisAgents.clear();
+        selectedAnalysisUris.clear();
+
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(20), dp(8), dp(20), dp(8));
+        ScrollView scroll = new ScrollView(this);
+        TextView disclosure = new TextView(this);
+        disclosure.setText("Seçtiğin .md dosyalarının tam metinleri ve aşağıdaki talimat HTTPS üzerinden sunucuya gönderilip Claude tarafından analiz edilir. Önizlemenin tamamını incele. Analiz yalnızca öneri üretir; dosya değiştirmez ve komut/araç çalıştırmaz.");
+        disclosure.setTextSize(13);
+        disclosure.setPadding(0, 0, 0, dp(8));
+        form.addView(disclosure);
+
+        analysisInstruction = new EditText(this);
+        analysisInstruction.setHint("Ne hakkında analiz istiyorsun?");
+        analysisInstruction.setMinLines(2);
+        analysisInstruction.setMaxLines(4);
+        analysisInstruction.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        analysisInstruction.setFilters(new android.text.InputFilter[]{
+                new android.text.InputFilter.LengthFilter(
+                        AgentAnalysisClient.MAX_INSTRUCTION_CHARACTERS)
+        });
+        form.addView(analysisInstruction);
+        Button pickAgents = new Button(this);
+        pickAgents.setText(".md uzman dosyası seç (en fazla 8)");
+        pickAgents.setOnClickListener(view -> pickAnalysisAgents());
+        form.addView(pickAgents);
+
+        analysisPreview = new TextView(this);
+        analysisPreview.setTextSize(12);
+        analysisPreview.setTextIsSelectable(true);
+        analysisPreview.setPadding(dp(8), dp(8), dp(8), dp(8));
+        analysisPreview.setBackground(roundedBackground(0xFF17222E, dp(8), 0xFF2A3A49));
+        analysisPreview.setText("Henüz uzman dosyası seçilmedi.");
+        LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, dp(220));
+        previewParams.topMargin = dp(8);
+        form.addView(analysisPreview, previewParams);
+
+        analysisConsent = new CheckBox(this);
+        analysisConsent.setText("Onaylıyorum: talimatı ve önizlemede gösterilen seçili dosyaların tam metinlerini sunucuya gönderebilirsin.");
+        analysisConsent.setTextColor(0xFFE8F1F6);
+        analysisConsent.setPadding(0, dp(6), 0, 0);
+        form.addView(analysisConsent);
+
+        scroll.addView(form);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Uzman analizi")
+                .setView(scroll)
+                .setPositiveButton("Gönder ve analiz et", null)
+                .setNegativeButton("Kapat", null)
+                .create();
+        analysisDialog = dialog;
+        analysisSubmitButton = null;
+        analysisConsentConfiguration = null;
+        analysisConsent.setOnCheckedChangeListener((button, checked) -> {
+            if (checked) {
+                try {
+                    analysisConsentConfiguration = currentAnalysisConfigurationFingerprint();
+                } catch (Exception error) {
+                    analysisConsentConfiguration = null;
+                    analysisConsent.setChecked(false);
+                    Toast.makeText(this, "Sunucu ayarları okunamadı; analiz onayı alınamadı.",
+                            Toast.LENGTH_LONG).show();
+                }
+            } else {
+                analysisConsentConfiguration = null;
+            }
+            updateAnalysisSubmitButton();
+        });
+        analysisInstruction.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence value, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence value, int start, int before, int count) {
+                invalidateAnalysisConsent();
+            }
+
+            @Override
+            public void afterTextChanged(Editable value) {
+            }
+        });
+        dialog.setOnShowListener(ignored -> {
+            analysisSubmitButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            analysisSubmitButton.setOnClickListener(view -> submitAgentAnalysis(dialog));
+            updateAnalysisSubmitButton();
+        });
+        dialog.setOnDismissListener(ignored -> {
+            analysisDialog = null;
+            analysisInstruction = null;
+            analysisPreview = null;
+            analysisConsent = null;
+            analysisSubmitButton = null;
+            analysisConsentConfiguration = null;
+            selectedAnalysisAgents.clear();
+            selectedAnalysisUris.clear();
+        });
+        dialog.show();
+    }
+
+    private void pickAnalysisAgents() {
+        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        picker.addCategory(Intent.CATEGORY_OPENABLE);
+        picker.setType("*/*");
+        picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        try {
+            startActivityForResult(picker, REQUEST_PICK_ANALYSIS_AGENTS);
+        } catch (Exception error) {
+            Toast.makeText(this, "Uzman dosyası seçicisi açılamadı.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void loadAnalysisAgents(Intent data) {
+        List<Uri> uris = new ArrayList<>();
+        if (data.getClipData() != null) {
+            for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                uris.add(data.getClipData().getItemAt(i).getUri());
+            }
+        } else if (data.getData() != null) {
+            uris.add(data.getData());
+        }
+        List<AgentAnalysisClient.Agent> additions = new ArrayList<>();
+        Set<String> seen = new HashSet<>(selectedAnalysisUris);
+        int totalBytes = 0;
+        for (AgentAnalysisClient.Agent agent : selectedAnalysisAgents) {
+            totalBytes += agent.prompt.getBytes(StandardCharsets.UTF_8).length;
+        }
+        try {
+            for (Uri uri : uris) {
+                if (!seen.add(uri.toString())) {
+                    continue;
+                }
+                if (selectedAnalysisAgents.size() + additions.size() >= AgentAnalysisClient.MAX_AGENTS) {
+                    throw new IOException("En fazla 8 uzman dosyası seçilebilir.");
+                }
+                String filename = selectedFileName(uri);
+                if (filename == null || !filename.toLowerCase(Locale.ROOT).endsWith(".md")) {
+                    throw new IOException("Yalnızca .md uzman dosyaları seçilebilir.");
+                }
+                byte[] bytes = readAnalysisPrompt(uri);
+                String prompt;
+                try {
+                    prompt = StandardCharsets.UTF_8.newDecoder()
+                            .onMalformedInput(CodingErrorAction.REPORT)
+                            .onUnmappableCharacter(CodingErrorAction.REPORT)
+                            .decode(ByteBuffer.wrap(bytes)).toString();
+                } catch (CharacterCodingException error) {
+                    throw new IOException("Uzman dosyası geçerli UTF-8 metni değil.", error);
+                }
+                if (prompt.trim().isEmpty() || prompt.indexOf('\0') >= 0) {
+                    throw new IOException("Uzman dosyası boş veya desteklenmeyen içerik taşıyor.");
+                }
+                totalBytes += bytes.length;
+                if (totalBytes > AgentAnalysisClient.MAX_TOTAL_PROMPT_BYTES) {
+                    throw new IOException("Uzman metinlerinin toplamı 48 KiB sınırını aşamaz.");
+                }
+                String name = filename.substring(0, filename.length() - 3);
+                if (name.trim().isEmpty() || name.length() > AgentAnalysisClient.MAX_AGENT_NAME_CHARACTERS) {
+                    throw new IOException("Uzman dosyasının adı geçerli uzunlukta olmalıdır.");
+                }
+                additions.add(new AgentAnalysisClient.Agent(
+                        "agent-" + (selectedAnalysisAgents.size() + additions.size() + 1),
+                        name, prompt));
+            }
+            selectedAnalysisAgents.addAll(additions);
+            for (Uri uri : uris) {
+                selectedAnalysisUris.add(uri.toString());
+            }
+            updateAnalysisPreview();
+            invalidateAnalysisConsent();
+        } catch (Exception error) {
+            Toast.makeText(this, error.getMessage() == null
+                    ? "Uzman dosyaları okunamadı." : error.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private byte[] readAnalysisPrompt(Uri uri) throws IOException {
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
+            if (input == null) {
+                throw new IOException("Uzman dosyası okunamadı.");
+            }
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                if (output.size() + count > AgentAnalysisClient.MAX_PROMPT_BYTES) {
+                    throw new IOException("Her uzman metni en fazla 16 KiB olabilir.");
+                }
+                output.write(buffer, 0, count);
+            }
+            return output.toByteArray();
+        }
+    }
+
+    private void updateAnalysisPreview() {
+        if (analysisPreview == null) {
+            return;
+        }
+        if (selectedAnalysisAgents.isEmpty()) {
+            analysisPreview.setText("Henüz uzman dosyası seçilmedi.");
+            return;
+        }
+        StringBuilder preview = new StringBuilder();
+        for (AgentAnalysisClient.Agent agent : selectedAnalysisAgents) {
+            preview.append("=== ").append(agent.name).append(" ===\n")
+                    .append(agent.prompt);
+            if (!agent.prompt.endsWith("\n")) {
+                preview.append('\n');
+            }
+            preview.append('\n');
+        }
+        analysisPreview.setText(preview.toString());
+    }
+
+    private void invalidateAnalysisConsent() {
+        if (analysisConsent != null && analysisConsent.isChecked()) {
+            analysisConsent.setChecked(false);
+        } else {
+            analysisConsentConfiguration = null;
+        }
+        updateAnalysisSubmitButton();
+    }
+
+    private void updateAnalysisSubmitButton() {
+        if (analysisSubmitButton != null && analysisConsent != null) {
+            analysisSubmitButton.setEnabled(analysisConsent.isChecked()
+                    && !selectedAnalysisAgents.isEmpty()
+                    && analysisInstruction != null
+                    && !analysisInstruction.getText().toString().trim().isEmpty());
+        }
+    }
+
+    private String currentAnalysisConfigurationFingerprint() throws Exception {
+        return AgentAnalysisClient.configurationFingerprint(
+                trimTrailingSlash(preferences.getString(KEY_SERVER_URL, "")), readApiKey());
+    }
+
+    private void submitAgentAnalysis(AlertDialog dialog) {
+        if (analysisConsent == null || !analysisConsent.isChecked()
+                || selectedAnalysisAgents.isEmpty() || analysisInstruction == null) {
+            return;
+        }
+        final String serverUrl = trimTrailingSlash(preferences.getString(KEY_SERVER_URL, ""));
+        final String apiKey;
+        final String instruction = analysisInstruction.getText().toString().trim();
+        final List<AgentAnalysisClient.Agent> agents =
+                new ArrayList<>(selectedAnalysisAgents);
+        try {
+            apiKey = readApiKey();
+            String fingerprint = AgentAnalysisClient.configurationFingerprint(serverUrl, apiKey);
+            if (!fingerprint.equals(analysisConsentConfiguration)) {
+                invalidateAnalysisConsent();
+                Toast.makeText(this, "Sunucu veya API anahtarı değişti; lütfen gönderim onayını yeniden ver.",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            AgentAnalysisClient.buildRequest(instruction, agents, true);
+        } catch (Exception error) {
+            Toast.makeText(this, error.getMessage() == null
+                    ? "Analiz isteği doğrulanamadı." : error.getMessage(), Toast.LENGTH_LONG).show();
+            return;
+        }
+        analysisConsent.setChecked(false);
+        dialog.dismiss();
+        setBusy(true);
+        network.execute(() -> {
+            try {
+                AgentAnalysisClient.Result result =
+                        postAgentAnalysis(serverUrl, apiKey, instruction, agents);
+                runOnUiThread(() -> showAgentAnalysisResult(result, agents));
+            } catch (Exception error) {
+                runOnUiThread(() -> showError(error));
+            } finally {
+                runOnUiThread(() -> setBusy(false));
+            }
+        });
+    }
+
+    private AgentAnalysisClient.Result postAgentAnalysis(String serverUrl, String apiKey,
+                                                         String instruction,
+                                                         List<AgentAnalysisClient.Agent> agents)
+            throws Exception {
+        Uri server = Uri.parse(serverUrl);
+        if (!"https".equalsIgnoreCase(server.getScheme()) || server.getHost() == null) {
+            throw new IOException("Uzman analizi yalnızca geçerli bir HTTPS sunucusuyla kullanılabilir.");
+        }
+        byte[] body = AgentAnalysisClient.buildRequest(instruction, agents, true)
+                .toString().getBytes(StandardCharsets.UTF_8);
+        HttpURLConnection connection = (HttpURLConnection) new URL(
+                trimTrailingSlash(serverUrl) + "/workspace/agents/analyze").openConnection();
+        connection.setInstanceFollowRedirects(false);
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(120000);
+        connection.setRequestMethod("POST");
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+        connection.setRequestProperty("Accept", "application/json");
+        connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+        try {
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(body);
+            }
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                throw new ChatErrorMapper.ServerResponseException(status);
+            }
+            byte[] response;
+            try (InputStream input = connection.getInputStream();
+                 java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192];
+                int count;
+                while ((count = input.read(buffer)) != -1) {
+                    if (output.size() + count > AgentAnalysisClient.MAX_REQUEST_BYTES) {
+                        throw new IOException("Sunucu yanıtı izin verilen boyutu aşıyor.");
+                    }
+                    output.write(buffer, 0, count);
+                }
+                response = output.toByteArray();
+            }
+            return AgentAnalysisClient.parseResponse(
+                    new String(response, StandardCharsets.UTF_8), agents);
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private void showAgentAnalysisResult(AgentAnalysisClient.Result result,
+                                        List<AgentAnalysisClient.Agent> agents) {
+        StringBuilder message = new StringBuilder("Uzman analizi\n\nClaude'un seçtiği uzmanlar:\n");
+        if (result.selectedAgents.isEmpty()) {
+            message.append("Bu istek için uygun uzman bulunamadı.\n");
+        } else {
+            for (String id : result.selectedAgents) {
+                message.append("• ").append(agentName(agents, id)).append('\n');
+            }
+        }
+        for (int i = 0; i < result.analyses.size(); i++) {
+            message.append("\n--- ").append(agentName(agents, result.analysisAgentIds.get(i)))
+                    .append(" ---\n").append(result.analyses.get(i)).append('\n');
+        }
+        message.append("\nBirleştirilmiş değerlendirme:\n").append(result.synthesis);
+        showLocalMessage("Çip", message.toString());
+    }
+
+    private String agentName(List<AgentAnalysisClient.Agent> agents, String id) {
+        for (AgentAnalysisClient.Agent agent : agents) {
+            if (agent.id.equals(id)) {
+                return agent.name;
+            }
+        }
+        return id;
+    }
+
+    private void requestContactLookup(String name) {
+        pendingContactQuery = name;
+        pauseWakeWordService();
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS)
+                == PackageManager.PERMISSION_GRANTED) {
+            performContactLookup(name);
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Kişiler izni")
+                .setMessage("Rehberinde “" + name + "” adını aramak için Kişiler izni gerekir. Arama bu cihazda yapılır; kişi bilgileri sunucuya gönderilmez.")
+                .setPositiveButton("İzin iste", (dialog, which) ->
+                        requestPermissions(new String[]{Manifest.permission.READ_CONTACTS},
+                                REQUEST_CONTACT_LOOKUP))
+                .setNegativeButton("Vazgeç", (dialog, which) -> {
+                    pendingContactQuery = null;
+                    showLocalMessage("Yerel", "Kişi araması iptal edildi.");
+                    resumeWakeWordServiceIfActive();
+                })
+                .show();
+    }
+
+    private void performContactLookup(String name) {
+        pendingContactQuery = null;
+        Map<String, List<String>> matches = new LinkedHashMap<>();
+        String normalizedQuery = WakeCommandParser.normalize(name);
+        try (Cursor cursor = getContentResolver().query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                new String[]{
+                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER
+                },
+                null, null,
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY + " ASC")) {
+            if (cursor != null) {
+                int nameColumn = cursor.getColumnIndexOrThrow(
+                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY);
+                int numberColumn = cursor.getColumnIndexOrThrow(
+                        ContactsContract.CommonDataKinds.Phone.NUMBER);
+                while (cursor.moveToNext() && matches.size() < 5) {
+                    String contactName = cursor.getString(nameColumn);
+                    String number = cursor.getString(numberColumn);
+                    if (contactName == null || number == null || number.trim().isEmpty()) {
+                        continue;
+                    }
+                    if (!WakeCommandParser.normalize(contactName).contains(normalizedQuery)) {
+                        continue;
+                    }
+                    List<String> numbers = matches.get(contactName);
+                    if (numbers == null) {
+                        numbers = new ArrayList<>();
+                        matches.put(contactName, numbers);
+                    }
+                    if (numbers.size() < 3 && !numbers.contains(number)) {
+                        numbers.add(number);
+                    }
+                }
+            }
+        } catch (Exception error) {
+            Log.e("Cip", "Local contact lookup failed.", error);
+            showLocalMessage("Yerel",
+                    "Kişiler açılamadı. İzin durumunu ve cihazdaki Kişiler uygulamasını kontrol et.");
+            resumeWakeWordServiceIfActive();
+            return;
+        }
+        if (matches.isEmpty()) {
+            showLocalMessage("Yerel",
+                    "Rehberde “" + name + "” adıyla telefon numarası bulunan bir kişi bulamadım.");
+        } else {
+            StringBuilder result = new StringBuilder("Rehberindeki eşleşmeler:\n");
+            for (Map.Entry<String, List<String>> match : matches.entrySet()) {
+                result.append("• ").append(match.getKey()).append(": ");
+                for (int i = 0; i < match.getValue().size(); i++) {
+                    if (i > 0) {
+                        result.append(", ");
+                    }
+                    result.append(match.getValue().get(i));
+                }
+                result.append('\n');
+            }
+            showLocalMessage("Yerel", result.toString().trim());
+        }
+        resumeWakeWordServiceIfActive();
+    }
+
+    private void clearConversation() {
+        conversationHistory.clear();
+        if (preferences != null) {
+            preferences.edit().remove(KEY_CHAT_HISTORY).apply();
+        }
+        if (conversation != null) {
+            conversation.removeAllViews();
+        }
     }
 
     private void toggleRecording() {
@@ -1592,7 +2106,9 @@ public final class MainActivity extends Activity {
                 String transcript = result.optString("transkript", "");
                 String answer = result.optString("cevap", "");
                 runOnUiThread(() -> {
-                    if (!transcript.isEmpty()) {
+                    if (result.optBoolean("temizlendi", false)) {
+                        clearConversation();
+                    } else if (!transcript.isEmpty()) {
                         addMessage("Sen", transcript);
                     }
                     showAnswer(answer.isEmpty() ? "Bir yanıt alınamadı." : answer);
@@ -1706,6 +2222,10 @@ public final class MainActivity extends Activity {
         resumeWakeWordServiceIfActive();
     }
 
+    private void showLocalMessage(String sender, String text) {
+        renderMessage(sender, text);
+    }
+
     private void addMessage(String sender, String text) {
         conversationHistory.append(sender, text);
         try {
@@ -1776,6 +2296,9 @@ public final class MainActivity extends Activity {
         busy = value;
         sendButton.setEnabled(!value);
         recordButton.setEnabled(!value);
+        if (analysisButton != null) {
+            analysisButton.setEnabled(!value);
+        }
         sendButton.setText(value ? "Bekle..." : "Gönder");
         sendButton.setAlpha(value ? 0.65f : 1f);
     }
@@ -1914,6 +2437,17 @@ public final class MainActivity extends Activity {
             } else {
                 updateWakeStatus("Sürekli dinleme bildirimi için bildirim izni gerekli.");
             }
+        } else if (requestCode == REQUEST_CONTACT_LOOKUP) {
+            String query = pendingContactQuery;
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED
+                    && query != null) {
+                performContactLookup(query);
+            } else {
+                pendingContactQuery = null;
+                showLocalMessage("Yerel",
+                        "Kişi araması için Kişiler izni verilmedi. İzin olmadan rehber aranamaz.");
+                resumeWakeWordServiceIfActive();
+            }
         }
     }
 
@@ -1962,7 +2496,11 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_OPEN_FILE) {
+        if (requestCode == REQUEST_PICK_ANALYSIS_AGENTS) {
+            if (resultCode == RESULT_OK && data != null) {
+                loadAnalysisAgents(data);
+            }
+        } else if (requestCode == REQUEST_OPEN_FILE) {
             if (resultCode == RESULT_OK && data != null && data.getData() != null) {
                 addMessage("Çip", "Seçilen dosya: " + selectedFileName(data.getData()));
             }

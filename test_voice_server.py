@@ -60,6 +60,45 @@ class KimlikDogrulamaTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_data(as_text=True), "Tamam.")
 
+    def test_acikca_gonderilen_bos_gecmis_sunucu_gecmisine_donmez(self):
+        voice_server.sohbet_ekle("test-session-empty", "eski soru", "eski yanıt")
+        with (
+            patch.dict(os.environ, {"ASISTAN_API_KEY": "test-key"}),
+            patch("voice_server.isle_komut", return_value=("Yeni yanıt.", 200, {})) as command,
+        ):
+            response = self.client.post(
+                "/komut",
+                data={"text": "yeni soru", "session": "test-session-empty", "gecmis": "[]"},
+                headers={"Authorization": "Bearer test-key"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(command.call_args.args[1], [])
+
+    def test_chat_prompt_allows_useful_detail_and_forbids_unprovided_device_access(self):
+        provider = Mock()
+        provider.messages.create.return_value = Mock(
+            content=[Mock(type="text", text="Açıklamalı yanıt.")],
+        )
+        with (
+            patch.dict(os.environ, {"CLAUDE_MODEL": "claude-test-model"}),
+            patch("voice_server.claude_istemci", return_value=provider),
+        ):
+            answer = voice_server.claude_cevap(
+                "Nasıl çalışır?",
+                [{"role": "user", "content": "Önceki soru"}],
+            )
+
+        self.assertEqual(answer, "Açıklamalı yanıt.")
+        call = provider.messages.create.call_args.kwargs
+        self.assertEqual(call["model"], "claude-test-model")
+        self.assertEqual(call["max_tokens"], 1200)
+        self.assertIn("yararlı ayrıntıyı esirgeme", call["system"])
+        self.assertIn("asla iddia etme", call["system"])
+        self.assertIn("bunu gizleme", call["system"])
+        self.assertEqual(call["messages"][0]["content"], "Önceki soru")
+        self.assertEqual(call["messages"][-1], {"role": "user", "content": "Nasıl çalışır?"})
+
     def test_komut_hata_yanitinda_saglayici_detaylarini_gizler_ve_loglar(self):
         hata_detayi = "provider API error code=provider-secret-123"
         with (
