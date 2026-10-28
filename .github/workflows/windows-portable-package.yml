@@ -1,0 +1,46 @@
+name: Windows portable package
+
+on:
+  push:
+    branches:
+      - mkir5428-cip-windows-kurulum-paketi
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Run Windows app tests
+        run: dotnet run --project .\windows-app\tests\Cip.Windows.Tests.csproj -c Release
+
+      - name: Publish self-contained Windows x64 app
+        run: dotnet publish .\windows-app\Cip.Windows.csproj -c Release -r win-x64 --self-contained true --output .\artifacts\cip-windows-win-x64
+
+      - name: Create ZIP and SHA-256 checksum
+        shell: pwsh
+        run: |
+          $archive = '.\artifacts\cip-windows-win-x64.zip'
+          Compress-Archive -Path '.\artifacts\cip-windows-win-x64\*' -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  cip-windows-win-x64.zip" | Out-File '.\artifacts\cip-windows-win-x64.zip.sha256' -Encoding ascii
+
+      - name: Upload Windows x64 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: cip-windows-win-x64
+          path: |
+            artifacts/cip-windows-win-x64.zip
+            artifacts/cip-windows-win-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
