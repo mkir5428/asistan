@@ -17,13 +17,34 @@ PowerShell'de depo kökünden:
 dotnet run --project .\windows-app\Cip.Windows.csproj
 ```
 
-Yayımlanabilir Windows x64 uygulaması oluşturmak için:
+## Windows x64 taşınabilir paketi
+
+Kurulum sihirbazı veya imza altyapısı kullanılmadığından dağıtım biçimi ZIP'tir.
+Paket self-contained yayımlanır; kullanıcı bilgisayarında ayrıca .NET Runtime
+kurulması gerekmez. Paketi hazırlamak için Windows'ta .NET 8 SDK kurulu olmalı.
+PowerShell'de depo kökünden önce doğrulamaları, ardından yayımlamayı çalıştırın:
 
 ```powershell
-dotnet publish .\windows-app\Cip.Windows.csproj -c Release -r win-x64 --self-contained true
+dotnet run --project .\windows-app\tests\Cip.Windows.Tests.csproj -c Release
+if ($LASTEXITCODE -ne 0) { throw "Windows uygulama testleri başarısız oldu." }
+
+$publishDir = Join-Path (Get-Location) 'artifacts\cip-windows-win-x64'
+$archivePath = Join-Path (Get-Location) 'artifacts\cip-windows-win-x64.zip'
+New-Item -ItemType Directory -Force -Path $publishDir | Out-Null
+dotnet publish .\windows-app\Cip.Windows.csproj -c Release -r win-x64 --self-contained true --output $publishDir
+if ($LASTEXITCODE -ne 0) { throw "Windows x64 yayımlama başarısız oldu." }
+New-Item -ItemType Directory -Force -Path (Split-Path $archivePath) | Out-Null
+Compress-Archive -Path (Join-Path $publishDir '*') -DestinationPath $archivePath -Force
+Get-FileHash $archivePath -Algorithm SHA256
 ```
 
-Self-contained yayımlama .NET çalışma zamanını pakete dahil eder.
+Oluşan `artifacts\cip-windows-win-x64.zip` dosyasını hedef bilgisayarda açın ve
+içindeki `Cip.Windows.exe` dosyasını çalıştırın. ZIP'in SHA-256 özeti dağıtım
+sırasında dosya bütünlüğünü karşılaştırmak içindir; uygulama imzalanmaz ve bu
+özet virüs içermediğine dair kanıt değildir. Windows Defender gerçek zamanlı
+korumasının açık olduğundan emin olun ve paketi çalıştırmadan önce indirdiğiniz
+arşivi tarayın. Self-contained yayımlama .NET çalışma zamanını pakete dahil eder,
+ancak uygulama kodunun güvenli olduğunu tek başına garanti etmez.
 
 İlk açılışta HTTPS sunucu adresini girip **Eşleştir** düğmesine basın. Üretilen
 10 haneli, tek kullanımlık kodu 5 dakika içinde Android uygulamasına girin.
