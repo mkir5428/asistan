@@ -125,6 +125,10 @@ yalnızca Android arama ekranını, SMS yalnızca hazır mesaj ekranını açar;
 sessizce arama yapmaz, SMS göndermez veya tüm kişiler/dosyalara arka planda erişmez.
 Yerel komutlar dar bir listeden eşleştirilir; diğer komutlar mevcut sunucu
 uç noktalarına gider.
+“Saat kaç?” ve “bugün hangi gün?” gibi tanınan saat/tarih soruları, cihazın
+yerel saat dilimi ve dil ayarları kullanılarak internet veya API anahtarı
+gerektirmeden yanıtlanır; yazılı komutlarda ve “Hey Çip” sonrasındaki komutlarda
+aynı şekilde çalışır.
 
 İlk açılışta Render sunucu adresini ve `ASISTAN_API_KEY` değerini Ayarlar'a gir.
 Anahtar Android Keystore ile cihazda şifreli saklanır; APK'nın içine gömülmez.
